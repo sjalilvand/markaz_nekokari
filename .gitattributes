@@ -1,0 +1,22 @@
+# پایان خط‌ها را در همه پلتفرم‌ها ثابت نگه می‌دارد
+# مخصوصاً start.sh باید LF باشد وگرنه در Git Bash ویندوز با خطای $'\r' شکست می‌خورد
+* text=auto eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.js text eol=lf
+*.jsx text eol=lf
+*.json text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.md text eol=lf
+*.csv text=auto
+# فایل‌های ویندوزی باید CRLF بمانند
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+# باینری‌ها
+*.db binary
+*.woff binary
+*.woff2 binary
+*.png binary
+*.jpg binary
+*.ico binary

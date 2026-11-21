@@ -1,20 +1,23 @@
-import React, { useState } from 'react'
+import React, { Suspense, lazy, useState } from 'react'
 import { NavLink, Route, Routes } from 'react-router-dom'
 import { useFilters, serverOutdated } from './filters.jsx'
-import { Icons } from './components/ui.jsx'
+import { Icons, Loading } from './components/ui.jsx'
 import Overview from './pages/Overview.jsx'
-import Analytics from './pages/Analytics.jsx'
-import Payments from './pages/Payments.jsx'
-import Provinces from './pages/Provinces.jsx'
-import Centers from './pages/Centers.jsx'
-import Kpis from './pages/Kpis.jsx'
-import Reports from './pages/Reports.jsx'
-import Explore from './pages/Explore.jsx'
-import Performance from './pages/Performance.jsx'
-import Chapter6 from './pages/Chapter6.jsx'
-import Slides from './pages/Slides.jsx'
-import TextReport from './pages/TextReport.jsx'
-import Admin from './pages/Admin.jsx'
+
+// صفحات دیگر با lazy-load بارگذاری می‌شوند تا باندل اولیه سبک بماند
+// و اولین نمایش داشبورد سریع‌تر باشد (code splitting)
+const Analytics = lazy(() => import('./pages/Analytics.jsx'))
+const Payments = lazy(() => import('./pages/Payments.jsx'))
+const Provinces = lazy(() => import('./pages/Provinces.jsx'))
+const Centers = lazy(() => import('./pages/Centers.jsx'))
+const Kpis = lazy(() => import('./pages/Kpis.jsx'))
+const Reports = lazy(() => import('./pages/Reports.jsx'))
+const Explore = lazy(() => import('./pages/Explore.jsx'))
+const Performance = lazy(() => import('./pages/Performance.jsx'))
+const Chapter6 = lazy(() => import('./pages/Chapter6.jsx'))
+const Slides = lazy(() => import('./pages/Slides.jsx'))
+const TextReport = lazy(() => import('./pages/TextReport.jsx'))
+const Admin = lazy(() => import('./pages/Admin.jsx'))
 
 const NAV = [
   { to: '/', label: 'داشبورد مدیریتی', icon: 'dashboard' },
@@ -146,21 +149,23 @@ export default function App() {
           </button>
         </div>
 
-        <Routes>
-          <Route path="/" element={<Overview />} />
-          <Route path="/analytics" element={<Analytics />} />
-          <Route path="/payments" element={<Payments />} />
-          <Route path="/provinces" element={<Provinces />} />
-          <Route path="/centers" element={<Centers />} />
-          <Route path="/kpis" element={<Kpis />} />
-          <Route path="/performance" element={<Performance />} />
-          <Route path="/chapter6" element={<Chapter6 />} />
-          <Route path="/slides" element={<Slides />} />
-          <Route path="/reports" element={<Reports />} />
-          <Route path="/explore" element={<Explore />} />
-          <Route path="/narrative" element={<TextReport />} />
-          <Route path="/admin" element={<Admin />} />
-        </Routes>
+        <Suspense fallback={<Loading />}>
+          <Routes>
+            <Route path="/" element={<Overview />} />
+            <Route path="/analytics" element={<Analytics />} />
+            <Route path="/payments" element={<Payments />} />
+            <Route path="/provinces" element={<Provinces />} />
+            <Route path="/centers" element={<Centers />} />
+            <Route path="/kpis" element={<Kpis />} />
+            <Route path="/performance" element={<Performance />} />
+            <Route path="/chapter6" element={<Chapter6 />} />
+            <Route path="/slides" element={<Slides />} />
+            <Route path="/reports" element={<Reports />} />
+            <Route path="/explore" element={<Explore />} />
+            <Route path="/narrative" element={<TextReport />} />
+            <Route path="/admin" element={<Admin />} />
+          </Routes>
+        </Suspense>
       </main>
     </div>
   )

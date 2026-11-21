@@ -40,8 +40,11 @@ def cached(ttl=_TTL):
             resp = fn(*args, **kwargs)
             try:
                 if len(_CACHE) >= MAX_ENTRIES:
-                    _CACHE.clear()
-                    _CACHE_TIMES.clear()
+                    # قدیمی‌ترین ~۱۲٪ ورودی‌ها حذف شوند؛ کل کش پاک نشود تا
+                    # ورودی‌های گرم‌شده در استارت سرور حفظ بمانند
+                    for k in list(_CACHE.keys())[:max(1, MAX_ENTRIES // 8)]:
+                        _CACHE.pop(k, None)
+                        _CACHE_TIMES.pop(k, None)
                 _CACHE[key] = resp
                 _CACHE_TIMES[key] = now
             except Exception:  # noqa

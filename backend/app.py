@@ -20,7 +20,7 @@ from apicache import cached, bump as cache_bump
 from db import DB_PATH, connect, ensure_schema, get_meta, set_meta
 from norm import norm
 
-SERVER_VERSION = '2.3.0'  # برای تشخیص نسخه در حال اجرا در /api/health و /api/meta
+SERVER_VERSION = '2.4.0'  # برای تشخیص نسخه در حال اجرا در /api/health و /api/meta
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 FRONT_DIST = os.path.join(os.path.dirname(BASE), 'frontend', 'dist')
@@ -756,6 +756,7 @@ DATASETS = {
 
 
 @app.route('/api/records')
+@cached()   # صفحه‌بندی/جست‌وجو/مرتب‌سازی در query string است ← کلید کش جدا و صحیح
 def api_records():
     db = get_db()
     ds = request.args.get('dataset', 'transactions')
@@ -805,6 +806,7 @@ def api_records():
 
 
 @app.route('/api/pivot')
+@cached()
 def api_pivot():
     db = get_db()
     f = F(request.args)
@@ -981,6 +983,7 @@ def api_import():
         except Exception as e:  # noqa
             results.append({'filename': fs.filename, 'error': str(e)[:300]})
     cache_bump()  # داده تغییر کرد — کش همه داشبوردها باطل شود
+    prewarm_async()  # کش داشبوردها با دادهٔ جدید دوباره گرم شود
     return jsonify({'results': results})
 
 
@@ -995,6 +998,7 @@ def api_reset_db():
     set_meta(db, 'data_mode', 'empty')
     db.commit()
     cache_bump()  # داده تغییر کرد — کش همه داشبوردها باطل شود
+    prewarm_async()
     return jsonify({'ok': True, 'cleared': len(names)})
 
 
@@ -1008,6 +1012,7 @@ def api_recompute():
     set_meta(db, 'imported_at', str(int(time.time())))
     n = db.execute('SELECT COUNT(*) n FROM centers').fetchone()['n']
     cache_bump()  # داده تغییر کرد — کش همه داشبوردها باطل شود
+    prewarm_async()
     return jsonify({'ok': True, 'centers_scored': n})
 
 
@@ -1015,6 +1020,66 @@ def api_recompute():
 def api_health():
     # نسخه برای اطمینان از اجرای آخرین کد (اگر نسخه قدیمی بود یعنی سرور ری‌استارت نشده)
     return jsonify({'ok': True, 'time': int(time.time()), 'version': SERVER_VERSION})
+
+
+# ── گرم‌کردن کش در پس‌زمینه ──
+# پس از استارت سرور و پس از هر تغییر داده، پرکاربردترین endpointها در نخِ پس‌زمینه
+# گرم می‌شوند تا اولین لود داشبورد کاربر هم به‌جای چند ثانیه، در چند میلی‌ثانیه باز شود.
+# نکتهٔ مهم: query string باید دقیقاً همان شکلی باشد که فرانت‌اند (buildQS) می‌سازد،
+# وگرنه کلید کش یکی نمی‌شود و گرم‌کردن بی‌اثر است.
+DEFAULT_QS = 'year=all&province=all&office=all'
+# endpointهایی که فرانت‌اند بدون هیچ query string صدا می‌زند
+PREWARM_NO_QUERY = ['/api/meta', '/api/payments/compare', '/api/finance', '/api/quality',
+                    '/api/explore/tables', '/api/kpi21', '/api/performance']
+# endpointهایی که با فیلترهای پیش‌فرض (همه «همه») صدا زده می‌شوند
+PREWARM_DEFAULT_QS = ['/api/overview', '/api/demographics', '/api/payments/categories',
+                      '/api/provinces', '/api/centers/summary', '/api/kpis', '/api/insights',
+                      '/api/narrative', '/api/networks']
+# endpointهای سنگین صفحهٔ خاص با پارامترهای پیش‌فرض همان صفحه
+import urllib.parse as _up
+PREWARM_SPECIAL = [
+    f'/api/pivot?{DEFAULT_QS}&row=province&col=year&metric=amount',
+    f'/api/records?{DEFAULT_QS}&dataset=transactions&page=1&per=15&dir=desc',
+    # flow با فرم percent-encoded دقیقاً مانند URLSearchParams مرورگر — تا کلید کش یکی شود
+    f'/api/payments/trend?{DEFAULT_QS}&flow={_up.quote("پرداخت")}',
+]
+# پرکاربردترین‌ها برای هر سال (وقتی کاربر سال را تغییر می‌دهد)
+PREWARM_YEAR_PATHS = ['/api/overview', '/api/kpis', '/api/demographics', '/api/payments/trend',
+                      '/api/payments/categories', '/api/provinces', '/api/centers/summary']
+
+
+def prewarm_async():
+    """گرم‌کردن کش در نخ جدا — استارت سرور و پاسخ درخواستِ import مسدود نمی‌شود."""
+    import threading
+
+    def _warm():
+        try:
+            years = []
+            with app.test_client() as c:
+                try:
+                    r = c.get('/api/meta')
+                    years = ((r.get_json() or {}).get('years') or [])[:3]
+                except Exception:  # noqa
+                    years = []
+                latest = years[-1] if years else None
+                paths = list(PREWARM_NO_QUERY)
+                paths += [f'{p}?{DEFAULT_QS}' for p in PREWARM_DEFAULT_QS]
+                paths += list(PREWARM_SPECIAL)
+                if latest:
+                    paths.append(f'/api/slide-report?year={latest}&province=all&office=all')
+                    paths.append(f'/api/performance?year1={latest}&province=all&office=all')
+                for y in years:
+                    paths += [f'{p}?year={y}&province=all&office=all' for p in PREWARM_YEAR_PATHS]
+                for p in paths:
+                    try:
+                        c.get(p)
+                    except Exception:  # noqa
+                        pass
+                print(f'کش داشبوردها گرم شد ({len(paths)} مسیر) — اولین لود هم سریع است.', flush=True)
+        except Exception:  # noqa
+            pass
+
+    threading.Thread(target=_warm, daemon=True, name='api-prewarm').start()
 
 
 # ─────────────────────── static frontend ────────────────────────
@@ -1117,4 +1182,5 @@ if __name__ == '__main__':
         _db = get_db()
         ensure_schema(_db)
     print(f'نیکوکاری {SERVER_VERSION} — سرور روی پورت {port}')
+    prewarm_async()  # گرم‌کردن کش در پس‌زمینه تا اولین لود کاربر هم سریع باشد
     app.run(host='0.0.0.0', port=port, threaded=True)
