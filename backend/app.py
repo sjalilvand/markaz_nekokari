@@ -15,6 +15,7 @@ from flask_cors import CORS
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import constants as C
 import narrative
+from api_ext import bp as ext_bp
 from db import DB_PATH, connect, ensure_schema, get_meta, set_meta
 from norm import norm
 
@@ -25,6 +26,7 @@ UPLOAD_DIR = os.path.join(BASE, 'data', 'uploads')
 app = Flask(__name__, static_folder=None)
 CORS(app)
 app.config['MAX_CONTENT_LENGTH'] = 512 * 1024 * 1024
+app.register_blueprint(ext_bp)
 
 MONTHS_J = C.MONTHS_J
 
@@ -60,7 +62,10 @@ def f_conds(f, alias='t', with_year=True, with_office=True, with_center=True):
         conds.append(f'{alias}.province_id = ?')
         params.append(int(f['province']))
     if with_office and f['office'] != 'all':
-        conds.append(f'{alias}.office_id = ?')
+        if alias == 'c':  # خود جدول مراکز ستون office_id دارد
+            conds.append(f'{alias}.office_id = ?')
+        else:  # بقیه جدول‌ها با زیرپرس از مراکز فیلتر می‌شوند (transactions، requests، needy، members، ...)
+            conds.append(f'{alias}.center_id IN (SELECT id FROM centers WHERE office_id = ?)')
         params.append(int(f['office']))
     if with_center and f['center'] != 'all' and f['center']:
         conds.append(f'{alias}.center_id = ?')

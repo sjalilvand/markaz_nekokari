@@ -27,8 +27,8 @@ def norm(s):
 
 
 def norm_key(s):
-    """کلید مقایسه‌ای: بدون فاصله و نیم‌فاصله"""
-    return norm(s).replace(' ', '').replace('_', '')
+    """کلید مقایسه‌ای: بدون فاصله و نیم‌فاصله؛ حروف لاتین کوچک می‌شوند تا نام فایل‌های انگلیسی مثل NK_HAMYARAN درست شناسایی شوند"""
+    return norm(s).replace(' ', '').replace('_', '').lower()
 
 
 def to_int(s, default=None):
@@ -52,14 +52,36 @@ def to_float(s, default=None):
 
 
 DATE_RE = re.compile(r'^(\d{4})[/\-.](\d{1,2})[/\-.](\d{1,2})$')
+DATE_RE_COMPACT = re.compile(r'^(\d{4})(\d{2})(\d{2})$')
+DATE_RE_LOOSE = re.compile(r'(1[3-5]\d{2})[/\-.](\d{1,2})(?:[/\-.](\d{1,2}))?')
 
 
 def parse_jalali(s):
-    """تاریخ شمسی 'YYYY/MM/DD' → (year, month, day) یا None"""
-    m = DATE_RE.match(norm(s))
-    if not m:
+    """تاریخ شمسی 'YYYY/MM/DD' → (year, month, day) یا None
+    فرمت‌های پشتیبانی‌شده: 1405/08/27، 1405-8-27، 1405.08.27، 14050827 و حالت نرم (تاریخ داخل متن)"""
+    t = norm(s).strip()
+    if not t:
         return None
-    y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
-    if 1300 <= y <= 1500 and 1 <= mo <= 12 and 1 <= d <= 31:
-        return (y, mo, d)
+    m = DATE_RE.match(t) or DATE_RE_COMPACT.match(t)
+    if m:
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3) or 1)
+        if 1300 <= y <= 1500 and 1 <= mo <= 12 and 1 <= d <= 31:
+            return (y, mo, d)
+    # حالت نرم: یافتن الگوی سال/ماه داخل رشته (مثل «تاریخ: ۱۴۰۵/۰۸/۲۷» یا متن اضافه)
+    m2 = DATE_RE_LOOSE.search(t)
+    if m2:
+        y, mo = int(m2.group(1)), int(m2.group(2))
+        d = int(m2.group(3) or 1)
+        if 1300 <= y <= 1500 and 1 <= mo <= 12 and 1 <= d <= 31:
+            return (y, mo, d)
+    return None
+
+
+def find_date_col(df):
+    """اگر ستون تاریخ با نام‌های مستعار پیدا نشد، هر ستونی که «تاریخ» دارد و «تولد» نیست را برگردان"""
+    for c in df.columns:
+        k = norm_key(c)
+        if ('تاریخ' in k or 'تاريخ' in k or 'زمان' in k or 'date' in k) \
+                and 'تولد' not in k and ' births' not in k:
+            return c
     return None

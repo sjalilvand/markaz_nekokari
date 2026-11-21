@@ -9,6 +9,10 @@ import Provinces from './pages/Provinces.jsx'
 import Centers from './pages/Centers.jsx'
 import Kpis from './pages/Kpis.jsx'
 import Reports from './pages/Reports.jsx'
+import Explore from './pages/Explore.jsx'
+import Performance from './pages/Performance.jsx'
+import Chapter6 from './pages/Chapter6.jsx'
+import Slides from './pages/Slides.jsx'
 import TextReport from './pages/TextReport.jsx'
 import Admin from './pages/Admin.jsx'
 
@@ -19,7 +23,11 @@ const NAV = [
   { to: '/provinces', label: 'عملکرد استان‌ها', icon: 'map' },
   { to: '/centers', label: 'مراکز و مدال‌ها', icon: 'building' },
   { to: '/kpis', label: 'شاخص‌های کلیدی', icon: 'gauge' },
+  { to: '/performance', label: 'عملکرد دوره‌ای', icon: 'trend' },
+  { to: '/chapter6', label: 'گزارش عملکرد اداره کل', icon: 'medal' },
+  { to: '/slides', label: 'گزارش اسلایدی', icon: 'presentation' },
   { to: '/reports', label: 'گزارش‌های قابل فیلتر', icon: 'report' },
+  { to: '/explore', label: 'رصد داده‌ها', icon: 'search' },
   { to: '/narrative', label: 'گزارش متنی تحلیلی', icon: 'people' },
   { to: '/admin', label: 'بارگذاری و کیفیت داده', icon: 'upload' },
 ]
@@ -129,7 +137,11 @@ export default function App() {
           <Route path="/provinces" element={<Provinces />} />
           <Route path="/centers" element={<Centers />} />
           <Route path="/kpis" element={<Kpis />} />
+          <Route path="/performance" element={<Performance />} />
+          <Route path="/chapter6" element={<Chapter6 />} />
+          <Route path="/slides" element={<Slides />} />
           <Route path="/reports" element={<Reports />} />
+          <Route path="/explore" element={<Explore />} />
           <Route path="/narrative" element={<TextReport />} />
           <Route path="/admin" element={<Admin />} />
         </Routes>

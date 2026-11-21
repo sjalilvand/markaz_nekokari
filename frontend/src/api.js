@@ -37,6 +37,14 @@ export const api = {
   quality: () => getJSON('quality'),
   records: (f, extra) => getJSON('records', f, extra),
   pivot: (f, extra) => getJSON('pivot', f, extra),
+  // ── APIهای توسعه‌یافته (رصد داده‌ها، شاخص‌ها، عملکرد دوره‌ای، گزارش اسلایدی) ──
+  exploreTables: () => getJSON('explore/tables'),
+  explore: (extra) => getJSON('explore', {}, extra),
+  exploreGroup: (extra) => getJSON('explore/group', {}, extra),
+  exploreExportUrl: (extra) => `/api/explore/export?${new URLSearchParams(extra)}`,
+  kpi21: () => getJSON('kpi21'),
+  performance: (extra) => getJSON('performance', {}, extra),
+  slideReport: (extra) => getJSON('slide-report', {}, extra),
   importFile: (file, onProgress) => new Promise((resolve, reject) => {
     const fd = new FormData()
     fd.append('files', file)

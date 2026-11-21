@@ -16,7 +16,7 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import constants as C
 from db import connect, ensure_schema, set_meta, SCHEMA_TABLES
-from norm import norm, norm_key, to_int, to_float, parse_jalali
+from norm import norm, norm_key, to_int, to_float, parse_jalali, find_date_col
 
 AGG_DDL = """
 CREATE TABLE IF NOT EXISTS agg_reports(
@@ -50,7 +50,9 @@ AL = {
     'tracking': ['شماره پیگیری', 'شمارهپیگیری', 'کد رهگیری', 'کدرهگیری', 'شناسه سند'],
     'creator': ['ایجادکننده', 'ایجادکننده', 'ثبت کننده', 'ثبتکننده'],
     'date': ['تاریخ ایجاد', 'تاریخثبت', 'تاریخ ثبت سند', 'تاریخ ثبت', 'تاريخ آخرين تغيير',
-             'تاریخ ثبتسند'],
+             'تاریخ ثبتسند', 'تاریخ', 'تاريخ', 'تاریخ پرداخت', 'تاریخ دریافت',
+             'تاریخ عملیات', 'تاریخ تراکنش', 'تاریخ سند', 'تاریخ ثبت پرداخت',
+             'تاریخ ثبت دریافت', 'زمان ثبت', 'تاریخ انجام'],
     'req_status': ['وضعیت درخواست', 'وضعیتدرخواست'],
     'process_status': ['وضعیت فرآیندی', 'وضعیتفرآیندی'],
     'amount': ['مبلغ', 'مبلغ کل', 'مبلغکل', 'جمع مبالغ تایید شده', 'جمعمبالغتاييده'],
@@ -318,8 +320,12 @@ def imp_transactions(conn, df, log, flow=None, method=None, amount_col_key='amou
         m = method or (norm(row.get(mc, '')) if mc else ('نقدی' if 'نقدی' in os.path.basename(log['filename']) else 'غیرنقدی'))
         cat = norm(row.get(cols['category'], '')) or None if cols['category'] else None
         src = norm(row.get(cols['source'], '')) or None if cols['source'] else None
-        ym = parse_jalali(row.get(cols['date'], '')) if cols['date'] else None
-        buf.append((norm(row.get(cols['tracking'], '')) or None, cid, pid, None,
+        if not cols['date']:
+            cols['date'] = find_date_col(df)  # ستون تاریخ با نام متفاوت (مثل «تاریخ عملیات»)
+        date_raw = row.get(cols['date'], '') if cols['date'] else ''
+        date_j = norm(date_raw) or None
+        ym = parse_jalali(date_raw) if cols['date'] else None
+        buf.append((norm(row.get(cols['tracking'], '')) or None, cid, pid, date_j,
                     ym[0] if ym else None, ym[1] if ym else None, f, m, cat, src,
                     to_float(row.get(cols['amount'], '0'), 0.0), None, None, log.get('srcfile')))
         n += 1
@@ -612,10 +618,11 @@ def imp_general_report(conn, df, log):
 
 SCHEMA_RULES = [
     # (نام اسکیما, ستون‌های کلیدی الزامی, handler, kwargs)
-    ('centers_new', ['province', 'office', 'center', 'license'] + [],
-     imp_centers_new, {}),
+    # توجه: hamyaran و needy قبل از centers_new — فایل همیاران/نیازمندان ستون‌های استان/مرکز/شناسه هم دارد
     ('hamyaran', ['national', 'name', 'family', 'province'], imp_hamyaran, {}),
     ('needy', ['national', 'name', 'family', 'need_type', 'age'], imp_needy, {}),
+    ('centers_new', ['province', 'office', 'center', 'license'] + [],
+     imp_centers_new, {}),
     ('requests_report', ['tracking', 'request_type', 'province'], imp_requests, {}),
     ('payments_cash', ['amount', 'province', 'center'], imp_transactions,
      {'flow': 'پرداخت', 'method': 'نقدی'}),
