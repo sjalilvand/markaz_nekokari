@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# داده و پایگاه داده (حجم بالا / محرک بازتولید)
+backend/data/*.db
+backend/data/*.db-*
+backend/data/uploads/
+*.sqlite
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# سیستم‌عامل
+.DS_Store
+Thumbs.db
