@@ -26,12 +26,17 @@ async function getJSON(path, filters = {}, extra = {}) {
     }
     throw new Error(`API ${path}: ${msg}`)
   }
-  // پاسخ ۲۰۰ اما غیر JSON (مثلاً HTML) — هرگز res.json() صدا زده نمی‌شود تا
-  // خطای خام JSON.parse به کاربر نمایش داده نشود
+  // بدنه ابتدا به‌صورت متن خوانده می‌شود؛ JSON.parse هرگز مستقیم صدا زده نمی‌شود
+  // تا خطای خام «Unexpected token '<'» به کاربر نمایش داده نشود
+  const text = await res.text()
   if (!ct.includes('application/json')) {
     throw new Error(`API ${path}: پاسخ سرور JSON نبود — سرور قدیمی است؛ سرویس را با آخرین نسخه راه‌اندازی مجدد کنید`)
   }
-  return res.json()
+  try {
+    return JSON.parse(text)
+  } catch (_) {
+    throw new Error(`API ${path}: پاسخ سرور JSON معتبر نبود — سرور قدیمی است؛ سرویس را با آخرین نسخه راه‌اندازی مجدد کنید`)
+  }
 }
 
 export const api = {

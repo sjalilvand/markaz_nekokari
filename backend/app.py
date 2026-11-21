@@ -20,7 +20,7 @@ from apicache import cached, bump as cache_bump
 from db import DB_PATH, connect, ensure_schema, get_meta, set_meta
 from norm import norm
 
-SERVER_VERSION = '2.2.0'  # برای تشخیص نسخه در حال اجرا در /api/health و /api/meta
+SERVER_VERSION = '2.3.0'  # برای تشخیص نسخه در حال اجرا در /api/health و /api/meta
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 FRONT_DIST = os.path.join(os.path.dirname(BASE), 'frontend', 'dist')
@@ -32,6 +32,39 @@ app.config['MAX_CONTENT_LENGTH'] = 512 * 1024 * 1024
 app.register_blueprint(ext_bp)
 
 MONTHS_J = C.MONTHS_J
+
+# ── فشرده‌سازی gzip پاسخ‌های بزرگ (JSON داشبوردها تا ۸۵KB → حدود ۱۰KB روی سیم) ──
+_COMPRESS_TYPES = {'application/json', 'text/html', 'text/csv', 'text/plain', 'text/css',
+                   'application/javascript', 'image/svg+xml'}
+
+
+@app.after_request
+def _gzip_response(resp):
+    """اگر کلاینت gzip بپذیرد و پاسخ به‌اندازهٔ کافی بزرگ باشد، فشرده شود."""
+    if (resp.status_code not in (200, 404)
+            or resp.direct_passthrough
+            or (resp.headers.get('Content-Encoding') or '')):
+        return resp
+    if (resp.headers.get('Content-Type') or '').split(';')[0].strip() not in _COMPRESS_TYPES:
+        return resp
+    accept = request.headers.get('Accept-Encoding', '')
+    if 'gzip' not in accept.lower():
+        return resp
+    try:
+        raw = resp.get_data()
+        if len(raw) < 1024:
+            return resp
+        import gzip as _gzip
+        packed = _gzip.compress(raw, compresslevel=5)
+        if len(packed) >= len(raw):
+            return resp
+        resp.set_data(packed)
+        resp.headers['Content-Encoding'] = 'gzip'
+        resp.headers['Content-Length'] = str(len(packed))
+        resp.headers['Vary'] = 'Accept-Encoding'
+    except Exception:  # noqa — در بدترین حالت پاسخ فشرده‌نشده می‌رود
+        pass
+    return resp
 
 
 def get_db():
@@ -157,10 +190,18 @@ def api_overview():
         r = db.execute(sql, params).fetchone()
         return r['s'] if r and r['s'] is not None else 0
 
-    payments = one("SELECT SUM(t.amount) s FROM transactions t " + (W + " AND t.flow='پرداخت'" if W else "WHERE t.flow='پرداخت'"), P)
-    receipts = one("SELECT SUM(t.amount) s FROM transactions t " + (W + " AND t.flow='دریافت'" if W else "WHERE t.flow='دریافت'"), P)
-    pay_cash = one("SELECT SUM(t.amount) s FROM transactions t " + (W + " AND t.flow='پرداخت' AND t.method='نقدی'" if W else "WHERE t.flow='پرداخت' AND t.method='نقدی'"), P)
-    pay_count = one("SELECT COUNT(*) s FROM transactions t " + (W + " AND t.flow='پرداخت'" if W else "WHERE t.flow='پرداخت'"), P)
+    # بهینه‌سازی: همهٔ اسکالرها در «یک» اسکن جدول تراکنش‌ها (به‌جای ۴ اسکن کامل)
+    row = db.execute(
+        'SELECT '
+        " SUM(CASE WHEN t.flow='پرداخت' THEN t.amount ELSE 0 END) payments,"
+        " SUM(CASE WHEN t.flow='دریافت' THEN t.amount ELSE 0 END) receipts,"
+        " SUM(CASE WHEN t.flow='پرداخت' AND t.method='نقدی' THEN t.amount ELSE 0 END) pay_cash,"
+        " SUM(CASE WHEN t.flow='پرداخت' THEN 1 ELSE 0 END) pay_count"
+        f' FROM transactions t {W}', P).fetchone()
+    payments = row['payments'] or 0
+    receipts = row['receipts'] or 0
+    pay_cash = row['pay_cash'] or 0
+    pay_count = row['pay_count'] or 0
     requests = one(f"SELECT COUNT(*) s FROM requests r {Wp}", Pp)
 
     # سری ماهانه ۱۴۰۳-۰۱ تا ۱۴۰۵-۰۸ (برای اسپارک‌لاین و نمودار روند)
@@ -277,20 +318,34 @@ def api_demographics():
         params.append(int(f['province']))
     W = ('WHERE ' + ' AND '.join(conds)) if conds else ''
 
-    bins = [(0, 10, '۰-۱۰'), (11, 20, '۱۱-۲۰'), (21, 30, '۲۱-۳۰'), (31, 40, '۳۱-۴۰'),
-            (41, 50, '۴۱-۵۰'), (51, 60, '۵۱-۶۰'), (61, 70, '۶۱-۷۰'), (71, 80, '۷۱-۸۰'),
-            (81, 90, '۸۱-۹۰'), (91, 200, '۹۱+')]
-    age_hist = []
-    for lo, hi, label in bins:
-        row = db.execute(f'SELECT COUNT(*) n FROM needy {W + " AND" if W else "WHERE"} age BETWEEN ? AND ?',
-                         params + [lo, hi]).fetchone()
-        age_hist.append({'label': label, 'value': row['n']})
+    # بهینه‌سازی: هیستوگرام سن در «یک» اسکن با CASE (به‌جای ۱۰ کوئری جداگانه)
+    age_sql = db.execute(
+        f'''SELECT
+          SUM(CASE WHEN age BETWEEN 0 AND 10 THEN 1 ELSE 0 END) b0,
+          SUM(CASE WHEN age BETWEEN 11 AND 20 THEN 1 ELSE 0 END) b1,
+          SUM(CASE WHEN age BETWEEN 21 AND 30 THEN 1 ELSE 0 END) b2,
+          SUM(CASE WHEN age BETWEEN 31 AND 40 THEN 1 ELSE 0 END) b3,
+          SUM(CASE WHEN age BETWEEN 41 AND 50 THEN 1 ELSE 0 END) b4,
+          SUM(CASE WHEN age BETWEEN 51 AND 60 THEN 1 ELSE 0 END) b5,
+          SUM(CASE WHEN age BETWEEN 61 AND 70 THEN 1 ELSE 0 END) b6,
+          SUM(CASE WHEN age BETWEEN 71 AND 80 THEN 1 ELSE 0 END) b7,
+          SUM(CASE WHEN age BETWEEN 81 AND 90 THEN 1 ELSE 0 END) b8,
+          SUM(CASE WHEN age > 90 THEN 1 ELSE 0 END) b9
+        FROM needy {W}''', params).fetchone()
+    age_hist = [
+        {'label': '۰-۱۰', 'value': age_sql['b0'] or 0}, {'label': '۱۱-۲۰', 'value': age_sql['b1'] or 0},
+        {'label': '۲۱-۳۰', 'value': age_sql['b2'] or 0}, {'label': '۳۱-۴۰', 'value': age_sql['b3'] or 0},
+        {'label': '۴۱-۵۰', 'value': age_sql['b4'] or 0}, {'label': '۵۱-۶۰', 'value': age_sql['b5'] or 0},
+        {'label': '۶۱-۷۰', 'value': age_sql['b6'] or 0}, {'label': '۷۱-۸۰', 'value': age_sql['b7'] or 0},
+        {'label': '۸۱-۹۰', 'value': age_sql['b8'] or 0}, {'label': '۹۱+', 'value': age_sql['b9'] or 0},
+    ]
     stats = db.execute(f'SELECT AVG(age) mean FROM needy {W}', params).fetchone()
 
-    decile = rows_as_dicts(db.execute(
-        f'SELECT decile d, COUNT(*) n FROM needy {W + " AND decile IS NOT NULL" if W else "WHERE decile IS NOT NULL"} GROUP BY decile ORDER BY d', params))
-    gender = rows_as_dicts(db.execute(
-        f"SELECT gender label, COUNT(*) n FROM needy {W + ' AND' if W else 'WHERE'} gender IS NOT NULL GROUP BY gender", params))
+    # بهینه‌سازی: جنسیت + میانگین سن هر جنسیت در یک کوئری؛ دهک + میانگین سن هر دهک در یک کوئری
+    gender_rows = rows_as_dicts(db.execute(
+        f"SELECT gender label, COUNT(*) n, AVG(age) avg_age FROM needy {W + ' AND' if W else 'WHERE'} gender IS NOT NULL GROUP BY gender", params))
+    gender = [{'label': r['label'], 'n': r['n']} for r in gender_rows]
+    age_gender = [{'gender': r['label'], 'avg_age': r['avg_age'], 'n': r['n']} for r in gender_rows]
     need_types = rows_as_dicts(db.execute(
         f"SELECT need_type label, COUNT(*) n FROM needy {W + ' AND' if W else 'WHERE'} need_type IS NOT NULL GROUP BY need_type ORDER BY n DESC", params))
     need_groups = rows_as_dicts(db.execute(
@@ -299,12 +354,11 @@ def api_demographics():
         f"SELECT vital label, COUNT(*) n FROM needy {W + ' AND' if W else 'WHERE'} vital IS NOT NULL GROUP BY vital", params))
     offices = rows_as_dicts(db.execute(
         f'SELECT office label, COUNT(*) n FROM needy {W + " AND office IS NOT NULL" if W else "WHERE office IS NOT NULL"} GROUP BY office ORDER BY n DESC LIMIT 10', params))
-    # سن به تفکیک جنسیت
-    age_gender = rows_as_dicts(db.execute(
-        f"SELECT gender, AVG(age) avg_age, COUNT(*) n FROM needy {W + ' AND' if W else 'WHERE'} gender IS NOT NULL GROUP BY gender", params))
-    # دهک × سن (هیتمپ ساده)
-    dec_age = rows_as_dicts(db.execute(
-        f"SELECT decile d, AVG(age) avg_age, COUNT(*) n FROM needy {W + ' AND' if W else 'WHERE'} decile IS NOT NULL GROUP BY decile ORDER BY d", params))
+    # دهک × سن (هیتمپ ساده) — در همان اسکن گروه‌بندی دهک
+    dec_rows = rows_as_dicts(db.execute(
+        f"SELECT decile d, COUNT(*) n, AVG(age) avg_age FROM needy {W + ' AND' if W else 'WHERE'} decile IS NOT NULL GROUP BY decile ORDER BY decile", params))
+    decile = [{'d': r['d'], 'n': r['n']} for r in dec_rows]
+    dec_age = [{'d': r['d'], 'avg_age': r['avg_age'], 'n': r['n']} for r in dec_rows]
     return jsonify({'age_hist': age_hist, 'age_stats': {'mean': round(stats['mean'] or 0, 1)},
                     'decile': decile, 'gender': gender, 'need_types': need_types,
                     'need_groups': need_groups, 'vital': vital, 'top_offices': offices,
@@ -547,9 +601,16 @@ def api_kpis():
     centers = one('SELECT COUNT(*) s FROM centers c' + (' WHERE c.province_id=' + str(f['province']) if f['province'] != 'all' else ''))
     needy = one('SELECT COUNT(*) s FROM needy n' + (' WHERE n.province_id=' + str(f['province']) if f['province'] != 'all' else ''))
     hamyaran = one('SELECT COUNT(*) s FROM hamyaran h' + (' WHERE h.province_id=' + str(f['province']) if f['province'] != 'all' else ''))
-    pay_all = one("SELECT SUM(t.amount) s FROM transactions t " + (W + " AND t.flow='پرداخت'" if W else "WHERE t.flow='پرداخت'"), P)
-    pay_cash = one("SELECT SUM(t.amount) s FROM transactions t " + (W + " AND t.flow='پرداخت' AND t.method='نقدی'" if W else "WHERE t.flow='پرداخت' AND t.method='نقدی'"), P)
-    receipts = one("SELECT SUM(t.amount) s FROM transactions t " + (W + " AND t.flow='دریافت'" if W else "WHERE t.flow='دریافت'"), P)
+    # بهینه‌سازی: سه اسکن تراکنش‌ها در یک اسکن واحد
+    r0 = db.execute(
+        'SELECT '
+        " SUM(CASE WHEN t.flow='پرداخت' THEN t.amount ELSE 0 END) pay_all,"
+        " SUM(CASE WHEN t.flow='پرداخت' AND t.method='نقدی' THEN t.amount ELSE 0 END) pay_cash,"
+        " SUM(CASE WHEN t.flow='دریافت' THEN t.amount ELSE 0 END) receipts"
+        f' FROM transactions t {W}', P).fetchone()
+    pay_all = r0['pay_all'] or 0
+    pay_cash = r0['pay_cash'] or 0
+    receipts = r0['receipts'] or 0
     reqs = one('SELECT COUNT(*) s FROM requests r' +
                (f' WHERE r.year={yr}' if yr else '') +
                ((' AND ' if yr else ' WHERE ') + f'r.province_id = {int(f["province"])}' if f['province'] != 'all' else ''))
@@ -563,11 +624,15 @@ def api_kpis():
                (W + " AND t.flow='پرداخت'" if W else "WHERE t.flow='پرداخت'") +
                " GROUP BY t.province_id ORDER BY s DESC LIMIT 5)", P)
 
-    yearly_pay = {r['y']: r['s'] for r in db.execute(
-        "SELECT year y, SUM(amount) s FROM transactions WHERE flow='پرداخت' GROUP BY year")}
-    # مقایسه هم‌دوره‌ای: سال آخر ناقص است (تا ماه جاری داده) — ماه‌های مشابه سال قبل
-    ym = {r['y']: r['m'] for r in db.execute(
-        'SELECT year y, MAX(month) m FROM transactions GROUP BY year')}
+    # بهینه‌سازی: پرداخت سالانه + حداکثر ماه هر سال در یک اسکن
+    _yrow = db.execute(
+        "SELECT year y, SUM(CASE WHEN flow='پرداخت' THEN amount ELSE 0 END) s, MAX(month) m "
+        'FROM transactions WHERE year IS NOT NULL GROUP BY year')
+    yearly_pay = {}
+    ym = {}
+    for r in _yrow:
+        yearly_pay[r['y']] = r['s']
+        ym[r['y']] = r['m']
     ys = sorted(y for y in yearly_pay.keys() if y is not None)
     last_y = ys[-1] if ys else None
     max_m = ym.get(last_y) if last_y else None
@@ -961,6 +1026,43 @@ def _no_cache(resp):
     return resp
 
 
+# بایت‌های فشردهٔ assetهای بزرگ (باندل JS/CSS) در حافظه نگه داشته می‌شود
+_ASSET_GZ_CACHE = {}
+
+
+def _compressed_asset(path):
+    """assetهای هش‌دار بزرگ (JS/CSS/SVG) را با gzip برمی‌گرداند — حجم سیم تا ~۷۵٪ کمتر"""
+    full = os.path.join(FRONT_DIST, path)
+    if not os.path.isfile(full):
+        return None
+    if not path.endswith(('.js', '.css', '.svg')) or os.path.getsize(full) < 10240:
+        return None
+    accept = request.headers.get('Accept-Encoding', '')
+    if 'gzip' not in accept.lower():
+        return None
+    mtime = os.path.getmtime(full)
+    hit = _ASSET_GZ_CACHE.get(path)
+    if hit and hit[0] == mtime:
+        packed, raw_len = hit[1], hit[2]
+    else:
+        import gzip as _gzip
+        with open(full, 'rb') as fh:
+            raw = fh.read()
+        packed = _gzip.compress(raw, compresslevel=6)
+        raw_len = len(raw)
+        if len(_ASSET_GZ_CACHE) > 32:
+            _ASSET_GZ_CACHE.clear()
+        _ASSET_GZ_CACHE[path] = (mtime, packed, raw_len)
+    mime = 'application/javascript' if path.endswith('.js') else (
+        'text/css' if path.endswith('.css') else 'image/svg+xml')
+    resp = Response(packed, mimetype=mime)
+    resp.headers['Content-Encoding'] = 'gzip'
+    resp.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
+    resp.headers['Vary'] = 'Accept-Encoding'
+    resp.headers['X-Original-Size'] = str(raw_len)
+    return resp
+
+
 @app.route('/')
 def index():
     if os.path.exists(os.path.join(FRONT_DIST, 'index.html')):
@@ -975,12 +1077,17 @@ def static_files(path):
         return jsonify({'error': f'مسیر API یافت نشد: /{path}'}), 404
     full = os.path.join(FRONT_DIST, path)
     if os.path.isfile(full):
+        if path.startswith('assets/'):
+            gz = _compressed_asset(path)
+            if gz is not None:
+                return gz
+            resp = send_from_directory(FRONT_DIST, path)
+            # فایل‌های باندل هش‌دار — کش بلندمدت برای سرعت لود داشبوردها
+            resp.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
+            return resp
         resp = send_from_directory(FRONT_DIST, path)
         if path == 'index.html':
             return _no_cache(resp)
-        if path.startswith('assets/'):
-            # فایل‌های باندل هش‌دار — کش بلندمدت برای سرعت لود داشبوردها
-            resp.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
         return resp
     if os.path.exists(os.path.join(FRONT_DIST, 'index.html')):
         return _no_cache(send_from_directory(FRONT_DIST, 'index.html'))

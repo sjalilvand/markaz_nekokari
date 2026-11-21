@@ -1,5 +1,19 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import * as echarts from 'echarts'
+// ایمپورت انتخابی از echarts/core — حجم باندل را حدود نصف می‌کند
+import * as echarts from 'echarts/core'
+import { LineChart, BarChart, PieChart, ScatterChart, RadarChart, GaugeChart, HeatmapChart } from 'echarts/charts'
+import {
+  GridComponent, TooltipComponent, LegendComponent, TitleComponent,
+  GraphicComponent, VisualMapComponent, DataZoomComponent,
+} from 'echarts/components'
+import { CanvasRenderer } from 'echarts/renderers'
+
+echarts.use([
+  LineChart, BarChart, PieChart, ScatterChart, RadarChart, GaugeChart, HeatmapChart,
+  GridComponent, TooltipComponent, LegendComponent, TitleComponent,
+  GraphicComponent, VisualMapComponent, DataZoomComponent,
+  CanvasRenderer,
+])
 
 // ───────────────────────── قالب‌بندی اعداد فارسی ─────────────────────────
 

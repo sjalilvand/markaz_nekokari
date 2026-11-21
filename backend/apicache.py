@@ -12,9 +12,9 @@ from flask import request
 
 _CACHE = {}
 _CACHE_TIMES = {}
-_TTL = 120          # ثانیه — فقط شبکهٔ امن؛ با bump داده‌ها فوراً بی‌اعتبار می‌شوند
+_TTL = 3600         # یک ساعت؛ با هر تغییر داده (import/reset/recompute) کش فوراً باطل می‌شود
 _GEN = 1            # نسخه داده؛ با هر تغییر داده افزایش می‌یابد
-MAX_ENTRIES = 256
+MAX_ENTRIES = 512
 
 
 def bump():

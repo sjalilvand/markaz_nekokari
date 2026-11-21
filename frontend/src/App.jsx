@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { NavLink, Route, Routes } from 'react-router-dom'
-import { useFilters } from './filters.jsx'
+import { useFilters, serverOutdated } from './filters.jsx'
 import { Icons } from './components/ui.jsx'
 import Overview from './pages/Overview.jsx'
 import Analytics from './pages/Analytics.jsx'
@@ -52,9 +52,23 @@ export default function App() {
   const offices = (meta?.offices || []).filter(
     (o) => filters.province === 'all' || String(o.province_id) === String(filters.province))
   const mode = meta?.data_mode || 'demo'
+  const stale = meta ? serverOutdated(meta.server_version) : false
 
   return (
     <div className="shell">
+      {stale && (
+        <div style={{
+          gridColumn: '1 / -1', background: 'linear-gradient(90deg,#7a1f1f,#a13030)', color: '#fff',
+          padding: '10px 18px', fontSize: 13.5, lineHeight: 1.9, display: 'flex', gap: 10, alignItems: 'center',
+        }}>
+          <Icons.warn style={{ width: 20, height: 20, flexShrink: 0 }} />
+          <span>
+            <b>نسخهٔ سرور قدیمی است{meta?.server_version ? ` (نسخهٔ فعلی: ${meta.server_version})` : ''} — این دلیل اصلی خطای «پاسخ JSON نبود» است.</b>
+            {' '}سرور با کد قبلی هنوز در حال اجراست؛ برای رفع کامل خطا، سرور را متوقف و با آخرین نسخه دوباره اجرا کنید:
+            <code style={{ background: 'rgba(0,0,0,.25)', padding: '2px 8px', borderRadius: 6, marginInlineStart: 8 }}>bash start.sh</code>
+          </span>
+        </div>
+      )}
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-logo"><Icons.heart style={{ width: 20, height: 20 }} /></div>
@@ -74,6 +88,8 @@ export default function App() {
         })}
         <div className="side-foot">
           بک‌اند: Flask + SQLite | فرانت: React + ECharts
+          <br />
+          {meta?.server_version ? `نسخهٔ سرور: ${meta.server_version}` : 'نسخهٔ سرور نامشخص'}
           <br />
           {mode === 'demo' ? 'داده نمونه وفادار به آمار فایل‌های واقعی' : mode === 'empty' ? 'پایگاه داده خالی — از صفحه بارگذاری، فایل‌های CSV را وارد کنید' : 'داده واقعی بارگذاری‌شده'}
         </div>

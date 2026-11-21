@@ -6,6 +6,24 @@ const FilterCtx = createContext(null)
 const BM_KEY = 'nk_bookmarks_v1'
 const THEME_KEY = 'nk_theme_v1'
 
+// حداقل نسخهٔ سروری که این نسخهٔ فرانت‌اند با آن سازگار است.
+// اگر سرور قدیمی‌تر اجرا شود (مثلاً ری‌استارت نشده باشد) هشدار سراسری نمایش داده می‌شود.
+export const REQUIRED_SERVER_VERSION = '2.3.0'
+
+function vparts(v) {
+  return String(v || '').split('.').map((x) => parseInt(x, 10) || 0)
+}
+
+export function serverOutdated(v, required = REQUIRED_SERVER_VERSION) {
+  if (!v) return true // سرور بدون فیلد نسخه = بسیار قدیمی
+  const a = vparts(v)
+  const b = vparts(required)
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) < (b[i] || 0)
+  }
+  return false
+}
+
 export function FilterProvider({ children }) {
   const [filters, setFilters] = useState({ year: 'all', province: 'all', office: 'all' })
   const [meta, setMeta] = useState(null)
@@ -20,7 +38,10 @@ export function FilterProvider({ children }) {
   }, [theme])
 
   useEffect(() => {
-    api_meta().then(setMeta).catch(() => {})
+    api_meta().then((m) => setMeta(m)).catch(() => {
+      // اگر meta اصلاً نیامد، نشانگر نسخهٔ نامشخص می‌گذاریم تا بنجر هشدار سرور قدیمی نمایش داده شود
+      setMeta({ meta_failed: true })
+    })
   }, [])
 
   const setFilter = useCallback((k, v) => {
@@ -60,6 +81,16 @@ export function FilterProvider({ children }) {
 export const useFilters = () => useContext(FilterCtx)
 
 async function api_meta() {
+  // parse امن: هرگز res.json() مستقیم — اگر پاسخ HTML بود خطای دوستانه پرتاب می‌شود
   const res = await fetch('/api/meta')
-  return res.json()
+  const ct = (res.headers.get('content-type') || '').toLowerCase()
+  const text = await res.text()
+  if (!res.ok || !ct.includes('application/json')) {
+    throw new Error('پاسخ /api/meta معتبر نبود')
+  }
+  try {
+    return JSON.parse(text)
+  } catch (_) {
+    throw new Error('پاسخ /api/meta قابل تجزیه نبود')
+  }
 }

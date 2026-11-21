@@ -816,9 +816,22 @@ def slide_report():
         r = db.execute(sql).fetchone()
         return r[0] if r and r[0] is not None else 0
 
-    pay = one("SELECT SUM(amount) FROM transactions t" + W + " AND t.flow='پرداخت'")
-    rec = one("SELECT SUM(amount) FROM transactions t" + W + " AND t.flow='دریافت'")
-    cnt_tx = one('SELECT COUNT(*) FROM transactions t' + W)
+    # بهینه‌سازی: همهٔ اسکالرها در «یک» اسکن جدول تراکنش‌ها (به‌جای ۶ اسکن کامل)
+    r0 = db.execute(
+        'SELECT'
+        " SUM(CASE WHEN t.flow='پرداخت' THEN t.amount ELSE 0 END) pay,"
+        " SUM(CASE WHEN t.flow='دریافت' THEN t.amount ELSE 0 END) rec,"
+        ' COUNT(*) cnt_tx,'
+        ' SUM(COALESCE(t.beneficiaries,0)) ben,'
+        ' COUNT(DISTINCT t.center_id) centers_n,'
+        " COUNT(DISTINCT CASE WHEN t.flow='دریافت' AND t.source IS NOT NULL AND t.source != '' THEN t.source END) donors_n"
+        ' FROM transactions t' + W).fetchone()
+    pay = r0['pay'] or 0
+    rec = r0['rec'] or 0
+    cnt_tx = r0['cnt_tx'] or 0
+    ben = r0['ben'] or 0
+    centers_n = r0['centers_n'] or 0
+    donors_n = r0['donors_n'] or 0
     months = [dict(r) for r in db.execute(
         'SELECT t.month m, SUM(CASE WHEN t.flow=\'پرداخت\' THEN t.amount ELSE 0 END) pay, '
         "SUM(CASE WHEN t.flow='دریافت' THEN t.amount ELSE 0 END) rec "
@@ -838,12 +851,8 @@ def slide_report():
     method_split = [dict(r) for r in db.execute(
         "SELECT t.method name, SUM(t.amount) pay FROM transactions t" + W +
         " AND t.flow='پرداخت' GROUP BY t.method ORDER BY pay DESC")]
-    ben = one('SELECT SUM(beneficiaries) FROM transactions t' + W)
     needy_n = one('SELECT COUNT(*) FROM needy WHERE ' +
                   (f'province_id = {prov_id}' if prov_id is not None else '1=1'))
-    centers_n = one('SELECT COUNT(DISTINCT center_id) FROM transactions t' + W)
-    donors_n = one("SELECT COUNT(DISTINCT source) FROM transactions t" + W +
-                   " AND t.flow='دریافت' AND t.source IS NOT NULL AND t.source != ''")
     networks_n = one('SELECT COUNT(DISTINCT network) FROM networks')
     orgs_n = one('SELECT COUNT(DISTINCT center_id) FROM networks')
     prev_year = year - 1
