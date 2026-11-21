@@ -37,11 +37,42 @@ export const api = {
   quality: () => getJSON('quality'),
   records: (f, extra) => getJSON('records', f, extra),
   pivot: (f, extra) => getJSON('pivot', f, extra),
-  importFiles: async (files) => {
+  importFile: (file, onProgress) => new Promise((resolve, reject) => {
     const fd = new FormData()
-    files.forEach((x) => fd.append('files', x))
-    const res = await fetch('/api/import', { method: 'POST', body: fd })
-    if (!res.ok) throw new Error('خطا در بارگذاری فایل‌ها')
+    fd.append('files', file)
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', '/api/import')
+    xhr.responseType = 'json'
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100))
+    }
+    xhr.onload = () => {
+      const body = xhr.response || {}
+      if (xhr.status !== 200) { reject(new Error(body.error || ('خطای سرور: ' + xhr.status))); return }
+      const r = (body.results && body.results[0]) || {}
+      if (r.error) { reject(new Error(r.error)); return }
+      resolve(r)
+    }
+    xhr.onerror = () => {
+      const e = new Error('خطای شبکه در حین ارسال فایل — اتصال به سرور قطع شد')
+      e.network = true
+      reject(e)
+    }
+    xhr.onabort = () => {
+      const e = new Error('ارسال فایل ناتمام ماند')
+      e.network = true
+      reject(e)
+    }
+    xhr.send(fd)
+  }),
+  resetDb: async () => {
+    const res = await fetch('/api/reset-db', { method: 'POST' })
+    if (!res.ok) throw new Error('خطا در پاک‌سازی پایگاه داده')
+    return res.json()
+  },
+  recompute: async () => {
+    const res = await fetch('/api/recompute', { method: 'POST' })
+    if (!res.ok) throw new Error('خطا در بازمحاسبه امتیازها')
     return res.json()
   },
   exportUrl: (f, extra) => `/api/export/csv${buildQS(f, extra)}`,

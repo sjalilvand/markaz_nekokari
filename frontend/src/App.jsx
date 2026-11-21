@@ -67,14 +67,14 @@ export default function App() {
         <div className="side-foot">
           بک‌اند: Flask + SQLite | فرانت: React + ECharts
           <br />
-          {mode === 'demo' ? 'داده نمونه وفادار به آمار فایل‌های واقعی' : 'داده واقعی بارگذاری‌شده'}
+          {mode === 'demo' ? 'داده نمونه وفادار به آمار فایل‌های واقعی' : mode === 'empty' ? 'پایگاه داده خالی — از صفحه بارگذاری، فایل‌های CSV را وارد کنید' : 'داده واقعی بارگذاری‌شده'}
         </div>
       </aside>
 
       <main className="main">
         <div className="topbar">
-          <span className={`badge ${mode === 'demo' ? 'demo' : 'real'}`}>
-            {mode === 'demo' ? 'داده نمونه کالیبره‌شده' : 'داده واقعی'}
+          <span className={`badge ${mode === 'real' ? 'real' : 'demo'}`}>
+            {mode === 'demo' ? 'داده نمونه کالیبره‌شده' : mode === 'empty' ? 'در انتظار بارگذاری داده' : 'داده واقعی'}
           </span>
           <div className="filters">
             <label>سال</label>

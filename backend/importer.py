@@ -15,13 +15,13 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import constants as C
-from db import connect, ensure_schema, set_meta
+from db import connect, ensure_schema, set_meta, SCHEMA_TABLES
 from norm import norm, norm_key, to_int, to_float, parse_jalali
 
 AGG_DDL = """
 CREATE TABLE IF NOT EXISTS agg_reports(
   id INTEGER PRIMARY KEY, source TEXT, province TEXT, city TEXT, center TEXT,
-  flow TEXT, method TEXT, category TEXT, amount REAL, extra TEXT);
+  flow TEXT, method TEXT, category TEXT, amount REAL, extra TEXT, src_file TEXT);
 """
 
 # نام‌های مستعار ستون‌ها (پس از norm_key: بدون فاصله)
@@ -222,10 +222,10 @@ def imp_hamyaran(conn, df, log):
                      norm(row.get(cols['father'], '')) or None, norm(row.get(cols['gender'], '')) or None,
                      norm(row.get(cols['birth'], '')) or None, age, pid,
                      norm(row.get(cols['office'], '')), cid,
-                     norm(row.get(cols['status'], '')) or None))
+                     norm(row.get(cols['status'], '')) or None, log.get('srcfile')))
         n += 1
     conn.executemany('INSERT INTO hamyaran(national_id, mobile, name, family, father, gender, birth, age,'
-                     ' province_id, office, center_id, status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)', rows)
+                     ' province_id, office, center_id, status, src_file) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)', rows)
     conn.commit()
     log['inserted'] = n
     return n
@@ -249,18 +249,18 @@ def imp_needy(conn, df, log, batch=20000):
                     cid, norm(row.get(cols['need_group'], '')) or None,
                     norm(row.get(cols['need_type'], '')) or None,
                     norm(row.get(cols['vital'], '')) or None, dec,
-                    norm(row.get(cols['mobile'], '')) or None))
+                    norm(row.get(cols['mobile'], '')) or None, log.get('srcfile')))
         n += 1
         if len(buf) >= batch:
             conn.executemany('INSERT INTO needy(national_id, name, family, gender, birth, age, province_id,'
-                             ' office, center_id, need_group, need_type, vital, decile, mobile)'
-                             ' VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)', buf)
+                             ' office, center_id, need_group, need_type, vital, decile, mobile, src_file)'
+                             ' VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', buf)
             buf = []
             conn.commit()
     if buf:
         conn.executemany('INSERT INTO needy(national_id, name, family, gender, birth, age, province_id,'
-                         ' office, center_id, need_group, need_type, vital, decile, mobile)'
-                         ' VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)', buf)
+                         ' office, center_id, need_group, need_type, vital, decile, mobile, src_file)'
+                         ' VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', buf)
     conn.commit()
     log['inserted'] = n
     return n
@@ -285,18 +285,18 @@ def imp_requests(conn, df, log):
                     ym[0] if ym else None, ym[1] if ym else None,
                     norm(row.get(cols['req_status'], '')) or None,
                     norm(row.get(cols['process_status'], '')) or None,
-                    0.0, req_category(t)))
+                    0.0, req_category(t), log.get('srcfile')))
         n += 1
         if len(buf) >= 10000:
             conn.executemany('INSERT INTO requests(tracking_no, center_id, province_id, request_type,'
                              ' category, national_id, creator, date_j, year, month, status,'
-                             ' process_status, amount, flow) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)', buf)
+                             ' process_status, amount, flow, src_file) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', buf)
             buf = []
             conn.commit()
     if buf:
         conn.executemany('INSERT INTO requests(tracking_no, center_id, province_id, request_type,'
                          ' category, national_id, creator, date_j, year, month, status,'
-                         ' process_status, amount, flow) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)', buf)
+                         ' process_status, amount, flow, src_file) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', buf)
     conn.commit()
     log['inserted'] = n
     return n
@@ -321,18 +321,18 @@ def imp_transactions(conn, df, log, flow=None, method=None, amount_col_key='amou
         ym = parse_jalali(row.get(cols['date'], '')) if cols['date'] else None
         buf.append((norm(row.get(cols['tracking'], '')) or None, cid, pid, None,
                     ym[0] if ym else None, ym[1] if ym else None, f, m, cat, src,
-                    to_float(row.get(cols['amount'], '0'), 0.0), None, None))
+                    to_float(row.get(cols['amount'], '0'), 0.0), None, None, log.get('srcfile')))
         n += 1
         if len(buf) >= 10000:
             conn.executemany('INSERT INTO transactions(tracking_no, center_id, province_id, date_j, year,'
-                             ' month, flow, method, category, source, amount, beneficiaries, coverage)'
-                             ' VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)', buf)
+                             ' month, flow, method, category, source, amount, beneficiaries, coverage, src_file)'
+                             ' VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)', buf)
             buf = []
             conn.commit()
     if buf:
         conn.executemany('INSERT INTO transactions(tracking_no, center_id, province_id, date_j, year,'
-                         ' month, flow, method, category, source, amount, beneficiaries, coverage)'
-                         ' VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)', buf)
+                         ' month, flow, method, category, source, amount, beneficiaries, coverage, src_file)'
+                         ' VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)', buf)
     conn.commit()
     log['inserted'] = n
     return n
@@ -342,15 +342,22 @@ def imp_members_kartex(conn, df, log):
     keys = ['province', 'office', 'center', 'status', 'license', 'national', 'name', 'family',
             'role', 'mobile', 'gender', 'birth', 'age']
     cols = {k: col(df, k) for k in keys}
+    # ستون‌های استعلام: تطابق دقیق + تطابق جزئی (مثل «استعلام سوء پیشینه» یا «سابقه کیفری»)
     inquiry = {}
+    frag_map = [('بدهکار بانک', 'bank_debt'), ('بدهی بانک', 'bank_debt'), ('بانک', 'bank_debt'),
+                ('بدهکار مالیاتی', 'tax_debt'), ('مالیات', 'tax_debt'),
+                ('مددجوی بهزیستی', 'welfare'), ('بهزیستی', 'welfare'),
+                ('چک برگشتی', 'bounced_cheque'), ('چک', 'bounced_cheque'),
+                ('کارت پایان خدمت', 'military'), ('خدمت', 'military'),
+                ('استخدام دستگاه های دولتی', 'gov_emp'), ('دولتی', 'gov_emp'),
+                ('در قید حیات', 'alive'), ('قید حیات', 'alive'), ('حیات', 'alive'),
+                ('سوء پیشینه', 'criminal'), ('پیشینه', 'criminal'), ('کیفری', 'criminal')]
     for c in df.columns:
         k = norm_key(c)
-        mapping = {'بدهکار بانک': 'bank_debt', 'بدهکار مالیاتی': 'tax_debt', 'مددجوی بهزیستی': 'welfare',
-                   'چک برگشتی': 'bounced_cheque', 'کارت پایان خدمت': 'military',
-                   'استخدام دستگاه های دولتی': 'gov_emp', 'در قید حیات': 'alive', 'سوء پیشینه': 'criminal'}
-        for src, dst in mapping.items():
-            if k == norm_key(src):
-                inquiry[dst] = c
+        for src, dst in frag_map:
+            if norm_key(src) in k:
+                inquiry.setdefault(dst, c)
+                break
     n = 0
     buf = []
     for r in df.itertuples(index=False):
@@ -363,19 +370,20 @@ def imp_members_kartex(conn, df, log):
                     norm(row.get(cols['birth'], '')) or None, to_int(row.get(cols['age'], '')),
                     None, None, norm(row.get(cols['role'], '')) or 'عضو',
                     norm(row.get(cols['status'], '')) or 'فعال',
-                    *[norm(row.get(inquiry[d], '')) or None for d in
-                      ('bank_debt', 'tax_debt', 'welfare', 'bounced_cheque', 'military', 'gov_emp', 'alive', 'criminal')]))
+                    *[norm(row.get(inquiry.get(d), '')) or None for d in
+                      ('bank_debt', 'tax_debt', 'welfare', 'bounced_cheque', 'military', 'gov_emp', 'alive', 'criminal')],
+                    log.get('srcfile')))
         n += 1
         if len(buf) >= 10000:
             conn.executemany('INSERT INTO members(center_id, national_id, name, family, gender, birth, age,'
                              ' education, job, role, status, bank_debt, tax_debt, welfare, bounced_cheque,'
-                             ' military, gov_emp, alive, criminal) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', buf)
+                             ' military, gov_emp, alive, criminal, src_file) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', buf)
             buf = []
             conn.commit()
     if buf:
         conn.executemany('INSERT INTO members(center_id, national_id, name, family, gender, birth, age,'
                          ' education, job, role, status, bank_debt, tax_debt, welfare, bounced_cheque,'
-                         ' military, gov_emp, alive, criminal) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', buf)
+                         ' military, gov_emp, alive, criminal, src_file) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', buf)
     conn.commit()
     log['inserted'] = n
     return n
@@ -435,10 +443,10 @@ def imp_networks(conn, df, log):
         for nc, c in net_cols.items():
             v = to_int(row.get(c, '0'), 0)
             if v:
-                buf.append((cid, nc, v))
+                buf.append((cid, nc, v, log.get('srcfile')))
         n += 1
     if buf:
-        conn.executemany('INSERT INTO networks(center_id, network, people) VALUES(?,?,?)', buf)
+        conn.executemany('INSERT INTO networks(center_id, network, people, src_file) VALUES(?,?,?,?)', buf)
     conn.commit()
     log['inserted'] = len(buf)
     return n
@@ -477,10 +485,10 @@ def imp_legal_donors(conn, df, log):
         cid = find_center(conn, None, row.get(cols['center']), pid)
         buf.append((pid, cid, norm(row.get(name_c, '')) or 'نیکوکار حقوقی',
                     norm(row.get(cols['national'], '')) or None,
-                    to_float(row.get(cols['amount'], '0'), 0.0), None))
+                    to_float(row.get(cols['amount'], '0'), 0.0), None, log.get('srcfile')))
         n += 1
-    conn.executemany('INSERT INTO legal_donors(province_id, center_id, name, national_id, amount, year)'
-                     ' VALUES(?,?,?,?,?,?)', buf)
+    conn.executemany('INSERT INTO legal_donors(province_id, center_id, name, national_id, amount, year, src_file)'
+                     ' VALUES(?,?,?,?,?,?,?)', buf)
     conn.commit()
     log['inserted'] = n
     return n
@@ -501,8 +509,8 @@ def imp_finance_province(conn, df, log):
             if amt is None:
                 continue
             cat = norm(c)
-            conn.execute('INSERT INTO finance_province(province_id, category, amount) VALUES(?,?,?)',
-                         (pid, cat, amt))
+            conn.execute('INSERT INTO finance_province(province_id, category, amount, src_file) VALUES(?,?,?,?)',
+                         (pid, cat, amt, log.get('srcfile')))
             n += 1
     conn.commit()
     log['inserted'] = n
@@ -520,11 +528,11 @@ def imp_compensation(conn, df, log):
         row = dict(zip(df.columns, r))
         pid = get_or_create_province(conn, row.get(pc, ''))
         conn.execute('INSERT INTO compensation_province(province_id, year, month, centers_ok,'
-                     ' centers_not_ok, centers_review, amount_ok, amount_not_ok) VALUES(?,?,?,?,?,?,?,?)',
+                     ' centers_not_ok, centers_review, amount_ok, amount_not_ok, src_file) VALUES(?,?,?,?,?,?,?,?,?)',
                      (pid, to_int(row.get(yc, '0'), 0), to_int(row.get(mc, '0'), 0),
                       to_int(row.get(okc, '0'), 0), to_int(row.get(notc, '0'), 0),
                       to_int(row.get(revc, '0'), 0), to_float(row.get(amokc, '0'), 0.0),
-                      to_float(row.get(amnotc, '0'), 0.0)))
+                      to_float(row.get(amnotc, '0'), 0.0), log.get('srcfile')))
         n += 1
     conn.commit()
     log['inserted'] = n
@@ -540,13 +548,13 @@ def imp_anomalies(conn, df, log, title):
         row = dict(zip(df.columns, r))
         pid = get_or_create_province(conn, row.get(cols['province'], ''))
         cid = find_center(conn, row.get(cols['license']), row.get(cols['center']), pid) if cols.get('license') else None
-        conn.execute('INSERT INTO anomalies(province_id, center_id, doc_no, date_j, descr, flow, amount, title)'
-                     ' VALUES(?,?,?,?,?,?,?,?)',
+        conn.execute('INSERT INTO anomalies(province_id, center_id, doc_no, date_j, descr, flow, amount, title, src_file)'
+                     ' VALUES(?,?,?,?,?,?,?,?,?)',
                      (pid, cid, norm(row.get(cols['tracking'], '')) or None,
                       norm(row.get(cols['date'], '')) or None,
                       norm(row.get(desc_c, '')) or None,
                       norm(row.get(cols['flow'], '')) or 'نامشخص',
-                      to_float(row.get(cols['amount'], '0'), 0.0), title))
+                      to_float(row.get(cols['amount'], '0'), 0.0), title, log.get('srcfile')))
         n += 1
     conn.commit()
     log['inserted'] = n
@@ -565,11 +573,11 @@ def imp_agg(conn, df, log, source_name):
                     norm(row.get(oc, '')) if oc else None,
                     norm(row.get(cc, '')) if cc else None,
                     to_float(row.get(amount_c, ''), 0.0) if amount_c else None,
-                    ' | '.join(f'{c}={norm(row.get(c, ""))}' for c in df.columns[:6])))
+                    ' | '.join(f'{c}={norm(row.get(c, ""))}' for c in df.columns[:6]), log.get('srcfile')))
         n += 1
     if buf:
-        conn.executemany('INSERT INTO agg_reports(source, province, city, center, amount, extra)'
-                         ' VALUES(?,?,?,?,?,?)', buf)
+        conn.executemany('INSERT INTO agg_reports(source, province, city, center, amount, extra, src_file)'
+                         ' VALUES(?,?,?,?,?,?,?)', buf)
     conn.commit()
     log['inserted'] = n
     return n
@@ -590,11 +598,11 @@ def imp_general_report(conn, df, log):
                     norm(row.get(cols['date'], '')) or None,
                     (1405 - b[0]) if b else None, None, None,
                     norm(row.get(cols['role'], '')) or 'عضو', 'فعال',
-                    None, None, None, None, None, None, None, None))
+                    None, None, None, None, None, None, None, None, log.get('srcfile')))
         n += 1
     conn.executemany('INSERT INTO members(center_id, national_id, name, family, gender, birth, age,'
                      ' education, job, role, status, bank_debt, tax_debt, welfare, bounced_cheque,'
-                     ' military, gov_emp, alive, criminal) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', buf)
+                     ' military, gov_emp, alive, criminal, src_file) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', buf)
     conn.commit()
     log['inserted'] = n
     return n
@@ -646,7 +654,6 @@ def classify(df, filename):
         ('ثبت نشده', 'anomalies', imp_anomalies, {'title': 'تراکنش ثبت نشده'}),
         ('گزارش کلی', 'general_report', imp_general_report, {}),
         ('گزارش', 'requests_report', imp_requests, {}),
-        ('report', 'requests_report', imp_requests, {}),
     ]
     for hint, schema, handler, kw in name_hints:
         if norm_key(hint) in fn:
@@ -663,22 +670,45 @@ def classify(df, filename):
 
 
 def import_file(conn, path, extra_log=None):
-    """وارد کردن یک فایل CSV؛ خروجی: رکورد گزارش کیفیت"""
+    """وارد کردن یک فایل CSV؛ خروجی: رکورد گزارش کیفیت
+    ورود مجدد همان فایل، ابتدا رکوردهای قبلی همان فایل را حذف می‌کند (idempotent)."""
     t0 = time.time()
     df, enc = read_csv(path)
     schema, handler, kw = classify(df, os.path.basename(path))
-    log = {'filename': os.path.basename(path), 'schema_name': schema or 'ناشناخته', 'encoding': enc,
+    fname = os.path.basename(path)
+    log = {'filename': fname, 'schema_name': schema or 'ناشناخته', 'encoding': enc,
            'rows_read': len(df), 'rows_inserted': 0, 'duplicates': 0,
            'nulls_pct': round(float(df.isin(['']).mean().mean()) * 100, 2),
-           'warnings': '', 'imported_at': time.strftime('%Y-%m-%d %H:%M:%S')}
+           'warnings': '', 'imported_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+           'srcfile': fname}
+    # پاک‌سازی رکوردهای قبلیِ همین فایل تا بارگذاری مجدد خطا تکراری نسازد
+    for t in SCHEMA_TABLES.get(schema, ['agg_reports']):
+        try:
+            conn.execute(f'DELETE FROM "{t}" WHERE src_file=?', (fname,))
+        except Exception:  # noqa
+            pass
+    try:
+        conn.execute('DELETE FROM import_log WHERE filename=?', (fname,))
+    except Exception:  # noqa
+        pass
+    conn.commit()
     if schema is None:
-        imp_agg(conn, df, log, log['filename'])
-        log['warnings'] = 'اسکیمای شناخته‌شده پیدا نشد؛ در جدول گزارش‌های عمومی ذخیره شد'
+        try:
+            imp_agg(conn, df, log, fname)
+            log['warnings'] = 'اسکیمای شناخته‌شده پیدا نشد؛ در جدول گزارش‌های عمومی ذخیره شد'
+        except Exception:
+            conn.rollback()
+            raise
     else:
-        if kw:
-            handler(conn, df, log, **kw)
-        else:
-            handler(conn, df, log)
+        try:
+            if kw:
+                handler(conn, df, log, **kw)
+            else:
+                handler(conn, df, log)
+        except Exception:
+            conn.rollback()  # عدم ثبت نصفه‌نیمه رکوردها هنگام خطا
+            raise
+        set_meta(conn, 'data_mode', 'real')
     conn.execute('INSERT INTO import_log(filename, schema_name, encoding, rows_read, rows_inserted,'
                  ' duplicates, nulls_pct, warnings, imported_at) VALUES(?,?,?,?,?,?,?,?,?)',
                  (log['filename'], log['schema_name'], log['encoding'], log['rows_read'],

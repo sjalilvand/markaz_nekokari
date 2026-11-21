@@ -4,9 +4,7 @@ __pycache__/
 .venv/
 
 # داده و پایگاه داده (حجم بالا / محرک بازتولید)
-backend/data/*.db
-backend/data/*.db-*
-backend/data/uploads/
+backend/data/
 *.sqlite
 
 # Node

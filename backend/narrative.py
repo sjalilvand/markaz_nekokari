@@ -51,9 +51,17 @@ def build_narrative(conn, f):
     if f.get('province') and f['province'] != 'all':
         row = conn.execute('SELECT name FROM provinces WHERE id=?', (f['province'],)).fetchone()
         scope = f'استان {row["name"]}' if row else scope
-    year_note = 'همه دوره‌ها (۱۴۰۳ تا ۱۴۰۵)'
+    # یادداشت دوره بر اساس سال‌های واقعی موجود در داده
+    yrs_all = [r['year'] for r in conn.execute(
+        'SELECT DISTINCT year FROM transactions WHERE year IS NOT NULL ORDER BY year').fetchall()]
     if f.get('year') and f['year'] != 'all':
         year_note = f'سال {f["year"]}'
+    elif len(yrs_all) == 1:
+        year_note = f'سال {yrs_all[0]}'
+    elif yrs_all:
+        year_note = f'همه دوره‌ها ({yrs_all[0]} تا {yrs_all[-1]})'
+    else:
+        year_note = 'همه دوره‌ها'
 
     c = conn
     centers = c.execute('SELECT COUNT(*) n FROM centers').fetchone()['n']
@@ -78,15 +86,15 @@ def build_narrative(conn, f):
     rec_all = (rec['s'] or 0)
 
     # سال‌ها برای مقایسه (هم‌دوره‌ای: سال آخر معمولاً ناقص است)
-    yrs = [r['year'] for r in c.execute('SELECT DISTINCT year FROM transactions ORDER BY year').fetchall()]
-    ym_max = {r['y']: r['m'] for r in c.execute('SELECT year y, MAX(month) m FROM transactions GROUP BY year')}
+    yrs = [r['year'] for r in c.execute('SELECT DISTINCT year FROM transactions WHERE year IS NOT NULL ORDER BY year').fetchall()]
+    ym_max = {r['y']: r['m'] for r in c.execute('SELECT year y, MAX(month) m FROM transactions WHERE year IS NOT NULL GROUP BY year')}
     yearly = {}
     for y in yrs:
         m_max = ym_max.get(y)
         # سال آخر ناقص است: مقایسه هم‌دوره‌ای با ماه‌های مشابه سال قبل
-        m_limit = ym_max.get(yrs[-1]) if y == yrs[-2] else None
+        m_limit = ym_max.get(yrs[-1]) if (len(yrs) >= 2 and y == yrs[-2]) else None
         m_cond = ''
-        if (y == yrs[-1] and m_max) or (y == yrs[-2] and m_limit):
+        if (y == yrs[-1] and m_max) or (len(yrs) >= 2 and y == yrs[-2] and m_limit):
             m_cond = ' AND month<=' + str(m_max if y == yrs[-1] else m_limit)
         yearly[y] = {
             'pay': c.execute('SELECT SUM(amount) s FROM transactions WHERE year=? AND flow=?' + m_cond,
@@ -190,8 +198,8 @@ def build_narrative(conn, f):
         'paragraphs': [
             'مراکز در ده شبکه مردمی (ازدواج، زیارت، وام قرض‌الحسنه، امور فرهنگی و تحصیلی، تأمین لوازم ضروری، مسکن، '
             'اشتغال و توانمندسازی، ورزش، وکلای نیکوکار و بهداشت و درمان) فعالیت می‌کنند.',
-            f'پرمشارک‌ترین شبکه‌ها به‌ترتیب: {"، ".join(r["network"] for r in nets[:4])} با مشارکت '
-            f'{fmt(nets[0]["n"])} تا {fmt(nets[3]["n"])} مرکز.',
+            ('پرمشارک‌ترین شبکه‌ها به‌ترتیب: ' + '، '.join(r['network'] for r in nets[:4])
+             + (f' با مشارکت {fmt(nets[0]["n"])} تا {fmt(nets[-1]["n"])} مرکز.' if nets else ' — داده‌ای ثبت نشده است.')),
             'شبکه «وکلای نیکوکار» کم‌مشارکت‌ترین شبکه است؛ فعال‌سازی آن می‌تواند هزینه حقوقی مددجویان را کاهش دهد.',
         ],
         'table': {'headers': ['شبکه مردمی', 'مراکز فعال', 'افراد شبکه'],

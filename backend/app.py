@@ -15,7 +15,7 @@ from flask_cors import CORS
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import constants as C
 import narrative
-from db import DB_PATH, connect, ensure_schema, get_meta
+from db import DB_PATH, connect, ensure_schema, get_meta, set_meta
 from norm import norm
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -136,20 +136,23 @@ def api_overview():
 
     # سری ماهانه ۱۴۰۳-۰۱ تا ۱۴۰۵-۰۸ (برای اسپارک‌لاین و نمودار روند)
     Wm, Pm = where(f, 't', with_year=False)
+    mnull = 't.year IS NOT NULL AND t.month IS NOT NULL'
+    Mcond = (Wm + ' AND ' + mnull) if Wm else ('WHERE ' + mnull)
+    ycond = (Wm + ' AND t.year IS NOT NULL') if Wm else 'WHERE t.year IS NOT NULL'
     monthly = rows_as_dicts(db.execute(
         'SELECT t.year y, t.month m, '
         " SUM(CASE WHEN t.flow='پرداخت' THEN t.amount ELSE 0 END) payments, "
         " SUM(CASE WHEN t.flow='دریافت' THEN t.amount ELSE 0 END) receipts, "
         " SUM(CASE WHEN t.flow='پرداخت' AND t.method='نقدی' THEN t.amount ELSE 0 END) cash, "
         " SUM(CASE WHEN t.flow='پرداخت' AND t.method='غیرنقدی' THEN t.amount ELSE 0 END) inkind "
-        f'FROM transactions t {Wm} GROUP BY t.year, t.month ORDER BY t.year, t.month', Pm))
+        f'FROM transactions t {Mcond} GROUP BY t.year, t.month ORDER BY t.year, t.month', Pm))
 
     # مقایسه سالانه برای دلتاها
     yearly = {r['y']: r for r in rows_as_dicts(db.execute(
         "SELECT t.year y, SUM(CASE WHEN t.flow='پرداخت' THEN t.amount ELSE 0 END) payments,"
         " SUM(CASE WHEN t.flow='دریافت' THEN t.amount ELSE 0 END) receipts"
-        f' FROM transactions t {Wm} GROUP BY t.year', Pm))}
-    years_sorted = sorted(yearly.keys())
+        f' FROM transactions t {ycond} GROUP BY t.year', Pm))}
+    years_sorted = sorted(y for y in yearly.keys() if y is not None)
     cur_year = int(f['year']) if f['year'] != 'all' else (years_sorted[-1] if years_sorted else None)
     prev_year = years_sorted[years_sorted.index(cur_year) - 1] if cur_year in years_sorted and years_sorted.index(cur_year) > 0 else None
 
@@ -286,15 +289,20 @@ def api_trend():
     f = F(request.args)
     flow = request.args.get('flow', 'پرداخت')
     W, P = where(f, 't', with_year=False)
+    nd = ' AND t.year IS NOT NULL AND t.month IS NOT NULL '
     sql = ('SELECT t.year y, t.month m, SUM(t.amount) amount, COUNT(*) cnt, '
            "SUM(CASE WHEN t.method='نقدی' THEN t.amount ELSE 0 END) cash, "
            "SUM(CASE WHEN t.method='غیرنقدی' THEN t.amount ELSE 0 END) inkind "
-           f'FROM transactions t ' + (W + ' AND t.flow = ? ' if W else 'WHERE t.flow = ? ') +
+           f'FROM transactions t ' + (W + nd + ' AND t.flow = ? ' if W else 'WHERE t.flow = ? ' + nd) +
            'GROUP BY t.year, t.month ORDER BY t.year, t.month')
-    series = rows_as_dicts(db.execute(sql, P + [flow]))
+    series = [r for r in rows_as_dicts(db.execute(sql, P + [flow]))
+              if r['y'] is not None and r['m'] is not None]
     # میانگین متحرک ۳ ماهه
     for i, r in enumerate(series):
-        r['label'] = f'{r["y"]}/{r["m"]:02d}'
+        try:
+            r['label'] = f'{int(r["y"])}/{int(r["m"]):02d}'
+        except (TypeError, ValueError):
+            r['label'] = str(r['y'])
         if i >= 2:
             r['ma3'] = round(sum(s['amount'] for s in series[i - 2:i + 1]) / 3, 0)
     annual = rows_as_dicts(db.execute(
@@ -303,7 +311,7 @@ def api_trend():
         " SUM(CASE WHEN t.flow='دریافت' THEN t.amount ELSE 0 END) receipts, "
         " SUM(CASE WHEN t.flow='پرداخت' AND t.method='نقدی' THEN t.amount ELSE 0 END) cash,"
         " SUM(CASE WHEN t.flow='پرداخت' AND t.method='غیرنقدی' THEN t.amount ELSE 0 END) inkind, "
-        ' COUNT(*) cnt FROM transactions t GROUP BY t.year ORDER BY t.year'))
+        ' COUNT(*) cnt FROM transactions t WHERE t.year IS NOT NULL GROUP BY t.year ORDER BY t.year'))
     return jsonify({'series': series, 'annual': annual})
 
 
@@ -315,14 +323,14 @@ def api_compare():
         " SUM(CASE WHEN flow='دریافت' THEN amount ELSE 0 END) receipts,"
         " SUM(CASE WHEN flow='پرداخت' AND method='نقدی' THEN amount ELSE 0 END) cash,"
         " SUM(CASE WHEN flow='پرداخت' AND method='غیرنقدی' THEN amount ELSE 0 END) inkind"
-        ' FROM transactions GROUP BY year ORDER BY year'))
+        ' FROM transactions WHERE year IS NOT NULL GROUP BY year ORDER BY year'))
     prev = None
     for r in by_year:
         r['growth'] = round((r['payments'] - prev) / prev * 100, 1) if prev else None
         prev = r['payments']
     matrix = rows_as_dicts(db.execute(
         'SELECT p.name, t.year y, SUM(t.amount) amount FROM transactions t '
-        'JOIN provinces p ON p.id=t.province_id WHERE t.flow=? GROUP BY p.id, t.year', ('پرداخت',)))
+        'JOIN provinces p ON p.id=t.province_id WHERE t.flow=? AND t.year IS NOT NULL GROUP BY p.id, t.year', ('پرداخت',)))
     provs = {}
     for r in matrix:
         provs.setdefault(r['name'], {})[str(r['y'])] = r['amount']
@@ -514,7 +522,7 @@ def api_kpis():
     # مقایسه هم‌دوره‌ای: سال آخر ناقص است (تا ماه جاری داده) — ماه‌های مشابه سال قبل
     ym = {r['y']: r['m'] for r in db.execute(
         'SELECT year y, MAX(month) m FROM transactions GROUP BY year')}
-    ys = sorted(yearly_pay.keys())
+    ys = sorted(y for y in yearly_pay.keys() if y is not None)
     last_y = ys[-1] if ys else None
     max_m = ym.get(last_y) if last_y else None
 
@@ -697,9 +705,12 @@ def api_pivot():
                'method': 't.method', 'flow': 't.flow'}.get(row_dim, 'p.name')
     col_sql = {'year': 't.year', 'month': 't.month', 'method': 't.method', 'flow': 't.flow'}.get(col_dim, 't.year')
     met_sql = 'SUM(t.amount)' if metric == 'amount' else 'COUNT(*)'
+    null_cond = ''
+    if col_dim in ('year', 'month'):
+        null_cond = f' AND {col_sql} IS NOT NULL'
     sql = (f'SELECT {row_sql} rlabel, {col_sql} clabel, {met_sql} val FROM transactions t '
            'LEFT JOIN provinces p ON p.id=t.province_id '
-           + (W + ' AND t.category IS NOT NULL' if W else 'WHERE t.category IS NOT NULL') +
+           + (W + ' AND t.category IS NOT NULL' + null_cond if W else 'WHERE t.category IS NOT NULL' + null_cond) +
            f' GROUP BY rlabel, clabel ORDER BY rlabel')
     data = rows_as_dicts(db.execute(sql, P))
     cols = sorted({str(r['clabel']) for r in data}, key=lambda x: (len(x), x))
@@ -854,6 +865,31 @@ def api_import():
         except Exception as e:  # noqa
             results.append({'filename': fs.filename, 'error': str(e)[:300]})
     return jsonify({'results': results})
+
+
+@app.route('/api/reset-db', methods=['POST'])
+def api_reset_db():
+    """پاک‌سازی کامل همه جدول‌ها برای شروع با داده واقعی (حذف داده نمونه و بارگذاری‌های قبلی)."""
+    db = get_db()
+    names = [r['name'] for r in db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
+    for t in names:
+        db.execute(f'DELETE FROM "{t}"')
+    set_meta(db, 'data_mode', 'empty')
+    db.commit()
+    return jsonify({'ok': True, 'cleared': len(names)})
+
+
+@app.route('/api/recompute', methods=['POST'])
+def api_recompute():
+    """بازمحاسبه امتیاز مرکب و مدال مراکز پس از بارگذاری داده واقعی."""
+    from generator import score_centers
+    db = get_db()
+    ensure_schema(db)
+    score_centers(db)
+    set_meta(db, 'imported_at', str(int(time.time())))
+    n = db.execute('SELECT COUNT(*) n FROM centers').fetchone()['n']
+    return jsonify({'ok': True, 'centers_scored': n})
 
 
 @app.route('/api/health')
