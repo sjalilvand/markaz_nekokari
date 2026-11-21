@@ -12,6 +12,7 @@ import json
 
 from flask import Blueprint, Response, jsonify, request
 
+from apicache import cached
 from db import get_meta
 
 bp = Blueprint('ext', __name__)
@@ -339,6 +340,7 @@ def build_where(t, filters, search=''):
 
 
 @bp.route('/api/explore/tables')
+@cached()
 def explore_tables():
     db = get_db_ext()
     out = []
@@ -362,6 +364,7 @@ def get_db_ext():
 
 
 @bp.route('/api/explore')
+@cached()
 def explore_data():
     """رصد جدول: فیلتر هر ستون + مرتب‌سازی + صفحه‌بندی + جمع کل"""
     db = get_db_ext()
@@ -399,6 +402,7 @@ def explore_data():
 
 
 @bp.route('/api/explore/group')
+@cached()
 def explore_group():
     """گروه‌بندی: GROUP BY یک ستون با تابع تجمیعی"""
     db = get_db_ext()
@@ -457,6 +461,7 @@ def explore_export():
 # ───────────────────── شاخص‌های جدول ۶-۲ (آیتم ۷) ─────────────────────
 
 @bp.route('/api/kpi21')
+@cached()
 def kpi21():
     db = get_db_ext()
     c = db
@@ -583,6 +588,7 @@ def kpi21():
 # ───────────── عملکرد دوره‌ای: مقایسه دو سال (آیتم ۳) ─────────────
 
 @bp.route('/api/performance')
+@cached()
 def performance():
     db = get_db_ext()
     args = request.args
@@ -595,128 +601,148 @@ def performance():
     office = args.get('office', 'all')
 
     # شرط پایه بدون سال (فیلتر استان/اداره) — برای همه پرس‌ها مشترک
+    # مقادیر غیرعددی (مانند 'all') نادیده گرفته می‌شوند تا هرگز 500 ندهند
     base = ''
     base_p = []
-    if prov != 'all':
+    try:
+        prov_id = int(prov)
+    except (TypeError, ValueError):
+        prov_id = None
+    try:
+        office_id = int(office)
+    except (TypeError, ValueError):
+        office_id = None
+    if prov_id is not None:
         base += ' AND t.province_id = ?'
-        base_p.append(int(prov))
-    if office != 'all':
+        base_p.append(prov_id)
+    if office_id is not None:
         base += ' AND t.center_id IN (SELECT id FROM centers WHERE office_id = ?)'
-        base_p.append(int(office))
+        base_p.append(office_id)
 
     def scope(year):
         """WHERE کامل با سال برای سال مشخص"""
         return 't.year = ?' + base, [year] + base_p
 
-    # روند ماهانه هر دو سال
-    months = []
-    for m in range(1, 13):
-        row = {'month': m}
-        for tag, y in (('1', year1), ('2', year2)):
-            if y is None:
-                row[f'pay{tag}'] = row[f'rec{tag}'] = row[f'ben{tag}'] = None
-                continue
-            W, P = scope(y)
-            r = db.execute(
-                'SELECT SUM(CASE WHEN t.flow=\'پرداخت\' THEN t.amount ELSE 0 END) pay, '
+    # ── بهینه‌سازی: همه تجمیع‌های دوساله با چند پرس GROUP BY unit-year انجام می‌شود
+    # (قبلاً به‌ازای هر ماه × هر سال یک پرس جداگانه اجرا می‌شد) ──
+    yl = [y for y in (year1, year2) if y is not None]
+    year_tags = {year1: ['1']}
+    if year2 is not None:
+        year_tags.setdefault(year2, []).append('2')
+    if yl:
+        ph = ','.join('?' * len(yl))
+        WY = f'WHERE t.year IN ({ph})' + base
+        PY = list(yl) + base_p
+
+        # روند ماهانه هر دو سال — یک پرس واحد
+        mrows = {}
+        for r in db.execute(
+                'SELECT t.year y, t.month m, '
+                "SUM(CASE WHEN t.flow='پرداخت' THEN t.amount ELSE 0 END) pay, "
                 "SUM(CASE WHEN t.flow='دریافت' THEN t.amount ELSE 0 END) rec, "
                 'SUM(t.beneficiaries) ben FROM transactions t '
-                f'WHERE t.month = {m} AND {W}', P).fetchone()
-            row[f'pay{tag}'] = r['pay'] or 0
-            row[f'rec{tag}'] = r['rec'] or 0
-            row[f'ben{tag}'] = r['ben'] or 0
-        months.append(row)
+                + WY + ' GROUP BY t.year, t.month', PY):
+            mrows[(r['y'], r['m'])] = r
+        months = []
+        for m in range(1, 13):
+            row = {'month': m}
+            for tag, y in (('1', year1), ('2', year2)):
+                r = mrows.get((y, m)) if y is not None else None
+                if y is None:
+                    row[f'pay{tag}'] = row[f'rec{tag}'] = row[f'ben{tag}'] = None
+                else:
+                    row[f'pay{tag}'] = (r['pay'] or 0) if r else 0
+                    row[f'rec{tag}'] = (r['rec'] or 0) if r else 0
+                    row[f'ben{tag}'] = (r['ben'] or 0) if r else 0
+            months.append(row)
 
-    # استان‌ها
-    prov_rows = {}
-    for tag, y in (('1', year1), ('2', year2)):
-        if y is None:
-            continue
-        W, P = scope(y)
+        # استان‌ها — یک پرس واحد
+        prov_rows = {}
         for r in db.execute(
-                "SELECT p.name name, SUM(CASE WHEN t.flow='پرداخت' THEN t.amount ELSE 0 END) pay, "
+                "SELECT t.year y, p.name name, SUM(CASE WHEN t.flow='پرداخت' THEN t.amount ELSE 0 END) pay, "
                 "SUM(CASE WHEN t.flow='دریافت' THEN t.amount ELSE 0 END) rec, COUNT(*) cnt "
                 'FROM transactions t LEFT JOIN provinces p ON p.id=t.province_id '
-                f'WHERE {W} GROUP BY p.name ORDER BY pay DESC', P):
+                + WY + ' GROUP BY t.year, p.name', PY):
             d = prov_rows.setdefault(r['name'] or 'نامشخص', {'name': r['name'] or 'نامشخص'})
-            d[f'pay{tag}'] = r['pay'] or 0
-            d[f'rec{tag}'] = r['rec'] or 0
-            d[f'cnt{tag}'] = r['cnt']
-    provinces = sorted(prov_rows.values(),
-                       key=lambda d: -(d.get('pay1') or 0) - (d.get('pay2') or 0))[:15]
-    for d in provinces:
-        p1, p2 = d.get('pay1'), d.get('pay2')
-        d['growth'] = round((p2 - p1) / p1 * 100, 1) if (p1 and p2 is not None) else None
+            for tag in year_tags.get(r['y'], []):
+                d[f'pay{tag}'] = r['pay'] or 0
+                d[f'rec{tag}'] = r['rec'] or 0
+                d[f'cnt{tag}'] = r['cnt']
+        provinces = sorted(prov_rows.values(),
+                           key=lambda d: -(d.get('pay1') or 0) - (d.get('pay2') or 0))[:15]
 
-    # مراکز برتر
-    center_rows = {}
-    for tag, y in (('1', year1), ('2', year2)):
-        if y is None:
-            continue
-        W, P = scope(y)
+        # مراکز برتر — یک پرس واحد
+        center_rows = {}
         for r in db.execute(
-                "SELECT c.name name, COALESCE(pp.name,'') prov, "
+                "SELECT t.year y, c.name name, COALESCE(pp.name,'') prov, "
                 "SUM(CASE WHEN t.flow='پرداخت' THEN t.amount ELSE 0 END) pay, COUNT(*) cnt "
                 'FROM transactions t LEFT JOIN centers c ON c.id=t.center_id '
-                f'LEFT JOIN provinces pp ON pp.id=t.province_id WHERE {W} '
-                'GROUP BY c.name, pp.name ORDER BY pay DESC LIMIT 15', P):
+                'LEFT JOIN provinces pp ON pp.id=t.province_id '
+                + WY + ' GROUP BY t.year, c.name, pp.name', PY):
             d = center_rows.setdefault(r['name'] or 'نامشخص',
                                        {'name': r['name'] or 'نامشخص', 'prov': r['prov']})
-            d[f'pay{tag}'] = r['pay'] or 0
-            d[f'cnt{tag}'] = r['cnt']
-    centers = sorted(center_rows.values(),
-                     key=lambda d: -(d.get('pay1') or 0) - (d.get('pay2') or 0))[:15]
+            for tag in year_tags.get(r['y'], []):
+                d[f'pay{tag}'] = r['pay'] or 0
+                d[f'cnt{tag}'] = r['cnt']
+        centers = sorted(center_rows.values(),
+                         key=lambda d: -(d.get('pay1') or 0) - (d.get('pay2') or 0))[:15]
 
-    # نوع خدمت (فعالیت)
-    svc_rows = {}
-    for tag, y in (('1', year1), ('2', year2)):
-        if y is None:
-            continue
-        W, P = scope(y)
+        # نوع خدمت (فعالیت) — یک پرس واحد
+        svc_rows = {}
         for r in db.execute(
-                "SELECT t.category label, SUM(CASE WHEN t.flow='پرداخت' THEN t.amount ELSE 0 END) pay, "
+                "SELECT t.year y, t.category label, SUM(CASE WHEN t.flow='پرداخت' THEN t.amount ELSE 0 END) pay, "
                 'COUNT(*) cnt FROM transactions t '
-                f'WHERE {W} AND t.category IS NOT NULL '
-                'GROUP BY t.category ORDER BY pay DESC LIMIT 12', P):
+                + WY + ' AND t.category IS NOT NULL '
+                'GROUP BY t.year, t.category', PY):
             d = svc_rows.setdefault(r['label'], {'label': r['label']})
-            d[f'pay{tag}'] = r['pay'] or 0
-            d[f'cnt{tag}'] = r['cnt']
-    services = sorted(svc_rows.values(),
-                      key=lambda d: -(d.get('pay1') or 0) - (d.get('pay2') or 0))[:12]
+            for tag in year_tags.get(r['y'], []):
+                d[f'pay{tag}'] = r['pay'] or 0
+                d[f'cnt{tag}'] = r['cnt']
+        services = sorted(svc_rows.values(),
+                          key=lambda d: -(d.get('pay1') or 0) - (d.get('pay2') or 0))[:12]
 
-    # عملکرد حوزه‌ها (ادارات)
-    off_rows = {}
-    for tag, y in (('1', year1), ('2', year2)):
-        if y is None:
-            continue
-        W, P = scope(y)
+        # عملکرد حوزه‌ها (ادارات) — یک پرس واحد
+        off_rows = {}
         for r in db.execute(
-                "SELECT COALESCE(o.name,'نامشخص') name, "
+                "SELECT t.year y, COALESCE(o.name,'نامشخص') name, "
                 "SUM(CASE WHEN t.flow='پرداخت' THEN t.amount ELSE 0 END) pay, "
                 "SUM(CASE WHEN t.flow='دریافت' THEN t.amount ELSE 0 END) rec, "
                 'COUNT(DISTINCT t.center_id) cnt '
                 'FROM transactions t LEFT JOIN centers c ON c.id=t.center_id '
-                f'LEFT JOIN offices o ON o.id=c.office_id WHERE {W} '
-                'GROUP BY o.name ORDER BY pay DESC LIMIT 40', P):
+                'LEFT JOIN offices o ON o.id=c.office_id '
+                + WY + ' GROUP BY t.year, o.name', PY):
             d = off_rows.setdefault(r['name'], {'name': r['name']})
-            d[f'pay{tag}'] = r['pay'] or 0
-            d[f'rec{tag}'] = r['rec'] or 0
-            d[f'cnt{tag}'] = r['cnt']
-    offices = sorted(off_rows.values(),
-                     key=lambda d: -(d.get('pay1') or 0) - (d.get('pay2') or 0))[:40]
+            for tag in year_tags.get(r['y'], []):
+                d[f'pay{tag}'] = r['pay'] or 0
+                d[f'rec{tag}'] = r['rec'] or 0
+                d[f'cnt{tag}'] = r['cnt']
+        offices = sorted(off_rows.values(),
+                         key=lambda d: -(d.get('pay1') or 0) - (d.get('pay2') or 0))[:40]
+    else:
+        months = [{'month': m, **{f'{k}{tag}': None for tag in ('1', '2') for k in ('pay', 'rec', 'ben')}}
+                  for m in range(1, 13)]
+        provinces, centers, services, offices = [], [], [], []
 
     # نیازمندان (برای سال‌وار نبودن داده نیازمندان، مقادیر کل با فیلتر استان گزارش می‌شود)
-    Wn = f' WHERE n.province_id = {int(prov)}' if prov != 'all' else ''
-    needy_total = db.execute(f'SELECT COUNT(*) n FROM needy n{Wn}').fetchone()['n']
+    # شرط استان یک‌بار و به‌صورت پارامتری ساخته می‌شود تا WHERE دوبله رخ ندهد
+    try:
+        prov_id = int(prov)
+    except (TypeError, ValueError):
+        prov_id = None
+    prov_cond = 'n.province_id = ?' if prov_id is not None else '1=1'
+    prov_params = (prov_id,) if prov_id is not None else ()
+    needy_total = db.execute(
+        f'SELECT COUNT(*) n FROM needy n WHERE {prov_cond}', prov_params).fetchone()['n']
     needy_by_prov = [dict(r) for r in db.execute(
         'SELECT p.name name, COUNT(*) cnt FROM needy n LEFT JOIN provinces p ON p.id=n.province_id '
-        f'{Wn} GROUP BY p.name ORDER BY cnt DESC LIMIT 12')]
+        f'WHERE {prov_cond} GROUP BY p.name ORDER BY cnt DESC LIMIT 12', prov_params)]
     needy_by_type = [dict(r) for r in db.execute(
-        f"SELECT COALESCE(n.need_type,'نامشخص') name, COUNT(*) cnt FROM needy n{Wn} "
-        'GROUP BY 1 ORDER BY cnt DESC LIMIT 8')]
+        f"SELECT COALESCE(n.need_type,'نامشخص') name, COUNT(*) cnt FROM needy n "
+        f'WHERE {prov_cond} GROUP BY 1 ORDER BY cnt DESC LIMIT 8', prov_params)]
     needy_deciles = [dict(r) for r in db.execute(
-        f'SELECT n.decile d, COUNT(*) cnt FROM needy n{Wn} '
-        'WHERE n.decile IS NOT NULL GROUP BY n.decile ORDER BY n.decile')]
+        f'SELECT n.decile d, COUNT(*) cnt FROM needy n '
+        f'WHERE {prov_cond} AND n.decile IS NOT NULL '
+        'GROUP BY n.decile ORDER BY n.decile', prov_params)]
 
     # جمع کل هر سال
     def totals_for(y):
@@ -734,6 +760,11 @@ def performance():
     t1, t2 = totals_for(year1), totals_for(year2)
     growth = round((t2['pay'] - t1['pay']) / t1['pay'] * 100, 1) if (year2 and t1['pay']) else None
 
+    # رشد هر استان پس از تجمیع واحد محاسبه می‌شود
+    for d in provinces:
+        p1, p2 = d.get('pay1'), d.get('pay2')
+        d['growth'] = round((p2 - p1) / p1 * 100, 1) if (p1 and p2 is not None) else None
+
     return jsonify({
         'years': years, 'year1': year1, 'year2': year2,
         'months': months, 'provinces': provinces, 'centers': centers,
@@ -747,21 +778,39 @@ def performance():
 # ───────────── گزارش اسلایدی عملکرد (آیتم ۶) ─────────────
 
 @bp.route('/api/slide-report')
+@cached()
 def slide_report():
     db = get_db_ext()
     args = request.args
     years = [r[0] for r in db.execute('SELECT DISTINCT year FROM transactions '
                                       'WHERE year IS NOT NULL ORDER BY year')]
-    year = int(args['year']) if args.get('year') else (years[-1] if years else 1404)
-    f_year = args.get('year', str(year))
+    latest_year = years[-1] if years else 1404
+    year_raw = args.get('year', '')
+    all_years_mode = (not year_raw) or year_raw == 'all'
+    year = latest_year
+    if not all_years_mode:
+        try:
+            year = int(year_raw)
+        except (TypeError, ValueError):
+            year = latest_year
+            all_years_mode = True
     prov = args.get('province', 'all')
     office = args.get('office', 'all')
     scope_sql = ''
-    if prov != 'all':
-        scope_sql += f' AND t.province_id = {int(prov)}'
-    if office != 'all':
-        scope_sql += f' AND t.center_id IN (SELECT id FROM centers WHERE office_id = {int(office)})'
-    W = f' WHERE t.year = {year}' + scope_sql
+    try:
+        prov_id = int(prov)
+    except (TypeError, ValueError):
+        prov_id = None
+    try:
+        office_id = int(office)
+    except (TypeError, ValueError):
+        office_id = None
+    if prov_id is not None:
+        scope_sql += f' AND t.province_id = {prov_id}'
+    if office_id is not None:
+        scope_sql += f' AND t.center_id IN (SELECT id FROM centers WHERE office_id = {office_id})'
+    year_sql = '1=1' if all_years_mode else f't.year = {year}'
+    W = f' WHERE {year_sql}' + scope_sql
 
     def one(sql):
         r = db.execute(sql).fetchone()
@@ -790,16 +839,19 @@ def slide_report():
         "SELECT t.method name, SUM(t.amount) pay FROM transactions t" + W +
         " AND t.flow='پرداخت' GROUP BY t.method ORDER BY pay DESC")]
     ben = one('SELECT SUM(beneficiaries) FROM transactions t' + W)
-    needy_n = one('SELECT COUNT(*) FROM needy' +
-                  (f' WHERE province_id = {int(prov)}' if prov != 'all' else ''))
+    needy_n = one('SELECT COUNT(*) FROM needy WHERE ' +
+                  (f'province_id = {prov_id}' if prov_id is not None else '1=1'))
     centers_n = one('SELECT COUNT(DISTINCT center_id) FROM transactions t' + W)
     donors_n = one("SELECT COUNT(DISTINCT source) FROM transactions t" + W +
                    " AND t.flow='دریافت' AND t.source IS NOT NULL AND t.source != ''")
     networks_n = one('SELECT COUNT(DISTINCT network) FROM networks')
     orgs_n = one('SELECT COUNT(DISTINCT center_id) FROM networks')
     prev_year = year - 1
-    prev_pay = one(f"SELECT SUM(amount) FROM transactions t WHERE t.year = {prev_year} AND t.flow='پرداخت'" + scope_sql)
-    growth = round((pay - prev_pay) / prev_pay * 100, 1) if prev_pay else None
+    if all_years_mode:
+        growth = None  # برای بازهٔ همه‌ساله، مقایسه با یک سال معنا ندارد
+    else:
+        prev_pay = one(f"SELECT SUM(amount) FROM transactions t WHERE t.year = {prev_year} AND t.flow='پرداخت'" + scope_sql)
+        growth = round((pay - prev_pay) / prev_pay * 100, 1) if prev_pay else None
 
     # بهترین و ضعیف‌ترین ماه
     best_m = max(months, key=lambda r: r['pay'])['m'] if months else None
@@ -809,17 +861,18 @@ def slide_report():
 
     slides = []
     prov_name = ''
-    if prov != 'all':
-        r = db.execute('SELECT name FROM provinces WHERE id = ?', (int(prov),)).fetchone()
+    if prov_id is not None:
+        r = db.execute('SELECT name FROM provinces WHERE id = ?', (prov_id,)).fetchone()
         prov_name = r['name'] if r else ''
     off_name = ''
-    if office != 'all':
-        r = db.execute('SELECT name FROM offices WHERE id = ?', (int(office),)).fetchone()
+    if office_id is not None:
+        r = db.execute('SELECT name FROM offices WHERE id = ?', (office_id,)).fetchone()
         off_name = r['name'] if r else ''
     scope_txt = ' — '.join(x for x in (prov_name, off_name) if x) or 'کل کشور'
+    period_txt = 'همه سال‌ها' if all_years_mode else f'سال {year}'
 
     slides.append({'type': 'title', 'title': 'گزارش عملکرد شبکه مراکز نیکوکاری و توانمندسازی',
-                   'subtitle': f'سال {year} — {scope_txt}',
+                   'subtitle': f'{period_txt} — {scope_txt}',
                    'badges': [f'{centers_n} مرکز فعال در دوره', f'{needy_n} نیازمند ثبت‌شده',
                               f'{cnt_tx} تراکنش']})
     slides.append({'type': 'kpi', 'title': 'اعداد کلیدی دوره',

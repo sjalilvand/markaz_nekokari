@@ -16,8 +16,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import constants as C
 import narrative
 from api_ext import bp as ext_bp
+from apicache import cached, bump as cache_bump
 from db import DB_PATH, connect, ensure_schema, get_meta, set_meta
 from norm import norm
+
+SERVER_VERSION = '2.2.0'  # برای تشخیص نسخه در حال اجرا در /api/health و /api/meta
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 FRONT_DIST = os.path.join(os.path.dirname(BASE), 'frontend', 'dist')
@@ -45,11 +48,29 @@ def close_db(_exc):
 
 
 def F(args):
+    """استخراج و اعتبارسنجی فیلترها — هر مقدار غیرعددی (جز 'all') نادیده گرفته می‌شود
+    تا هیچ endpoint هرگز به‌خاطر پارامتر بد، 500 ندهد و از SQL injection هم محفوظ بماند"""
+
+    def _id(v):
+        v = (v or 'all').strip()
+        if v in ('', 'all'):
+            return 'all'
+        try:
+            return str(int(v))
+        except ValueError:
+            return 'all'
+
+    year = (args.get('year') or 'all').strip()
+    if year not in ('', 'all'):
+        try:
+            year = str(int(year))
+        except ValueError:
+            year = 'all'
     return {
-        'year': args.get('year', 'all'),
-        'province': args.get('province', 'all'),
-        'office': args.get('office', 'all'),
-        'center': args.get('center', 'all'),
+        'year': year,
+        'province': _id(args.get('province')),
+        'office': _id(args.get('office')),
+        'center': _id(args.get('center')),
     }
 
 
@@ -85,6 +106,7 @@ def rows_as_dicts(cur):
 # ───────────────────────────── meta ─────────────────────────────
 
 @app.route('/api/meta')
+@cached()
 def api_meta():
     db = get_db()
     provs = rows_as_dicts(db.execute('SELECT id, name FROM provinces ORDER BY name'))
@@ -106,6 +128,7 @@ def api_meta():
         'receipts_all': db.execute("SELECT SUM(amount) s FROM transactions WHERE flow='دریافت'").fetchone()['s'] or 0,
     }
     return jsonify({
+        'server_version': SERVER_VERSION,
         'provinces': provs, 'offices': offs, 'years': years, 'months': MONTHS_J,
         'request_types': [r['request_type'] for r in db.execute(
             'SELECT DISTINCT request_type FROM requests WHERE request_type IS NOT NULL')],
@@ -123,6 +146,7 @@ def api_meta():
 # ─────────────────────────── overview ───────────────────────────
 
 @app.route('/api/overview')
+@cached()
 def api_overview():
     db = get_db()
     f = F(request.args)
@@ -243,6 +267,7 @@ def fmt(n):
 # ───────────────────────── demographics ─────────────────────────
 
 @app.route('/api/demographics')
+@cached()
 def api_demographics():
     db = get_db()
     f = F(request.args)
@@ -289,6 +314,7 @@ def api_demographics():
 # ─────────────────────────── payments ───────────────────────────
 
 @app.route('/api/payments/trend')
+@cached()
 def api_trend():
     db = get_db()
     f = F(request.args)
@@ -321,6 +347,7 @@ def api_trend():
 
 
 @app.route('/api/payments/compare')
+@cached()
 def api_compare():
     db = get_db()
     by_year = rows_as_dicts(db.execute(
@@ -346,6 +373,7 @@ def api_compare():
 
 
 @app.route('/api/payments/categories')
+@cached()
 def api_categories():
     db = get_db()
     f = F(request.args)
@@ -368,11 +396,21 @@ def api_categories():
 # ─────────────────────────── provinces ──────────────────────────
 
 @app.route('/api/provinces')
+@cached()
 def api_provinces():
     db = get_db()
     f = F(request.args)
-    W, P = where(f, 't', with_year=True)
-    year_suffix = ' AND t.year = ' + str(int(f['year'])) if f['year'] != 'all' else ''
+    # تجمیع‌های سنگین یک‌بار به‌صورت GROUP BY انجام می‌شوند (چند برابر سریع‌تر از زیرپرس همبسته)
+    year = f['year']
+    tx_ycond = (' WHERE year = ' + str(int(year))) if year != 'all' else ''
+    tx_agg = {r['pid']: r for r in rows_as_dicts(db.execute(
+        'SELECT province_id pid, '
+        "SUM(CASE WHEN flow='پرداخت' THEN amount ELSE 0 END) payments, "
+        "SUM(CASE WHEN flow='دریافت' THEN amount ELSE 0 END) receipts "
+        f'FROM transactions{tx_ycond} GROUP BY province_id'))}
+    req_ycond = (' WHERE year = ' + str(int(year))) if year != 'all' else ''
+    req_agg = {r['pid']: r['n'] for r in rows_as_dicts(db.execute(
+        f'SELECT province_id pid, COUNT(*) n FROM requests{req_ycond} GROUP BY province_id'))}
     prov_filter = ''
     prov_param = []
     if f['province'] != 'all':
@@ -384,15 +422,14 @@ def api_provinces():
         ' (SELECT COALESCE(SUM(c.total_active),0) FROM centers c WHERE c.province_id=p.id) members,'
         ' (SELECT COUNT(*) FROM needy n WHERE n.province_id=p.id) needy,'
         ' (SELECT COUNT(*) FROM hamyaran h WHERE h.province_id=p.id) hamyaran,'
-        f' (SELECT SUM(t.amount) FROM transactions t WHERE t.province_id=p.id AND t.flow="پرداخت"{year_suffix}) payments,'
-        f' (SELECT SUM(t.amount) FROM transactions t WHERE t.province_id=p.id AND t.flow="دریافت"{year_suffix}) receipts,'
-        f' (SELECT COUNT(*) FROM requests r WHERE r.province_id=p.id{" AND r.year=" + str(int(f["year"])) if f["year"] != "all" else ""}) requests,'
         ' (SELECT AVG(c.score) FROM centers c WHERE c.province_id=p.id) avg_score'
         f' FROM provinces p{prov_filter} ORDER BY p.name', prov_param))
-    total_pay = sum(r['payments'] or 0 for r in rows)
+    total_pay = sum((tx_agg.get(r['id'], {}).get('payments') or 0) for r in rows)
     for r in rows:
-        r['payments'] = r['payments'] or 0
-        r['receipts'] = r['receipts'] or 0
+        t = tx_agg.get(r['id']) or {}
+        r['payments'] = t.get('payments') or 0
+        r['receipts'] = t.get('receipts') or 0
+        r['requests'] = req_agg.get(r['id'], 0)
         r['balance'] = r['receipts'] - r['payments']
         r['pay_per_center'] = r['payments'] / r['centers'] if r['centers'] else 0
         r['needy_per_center'] = r['needy'] / r['centers'] if r['centers'] else 0
@@ -408,6 +445,7 @@ def api_provinces():
 # ─────────────────────────── centers ────────────────────────────
 
 @app.route('/api/centers')
+@cached()
 def api_centers():
     db = get_db()
     f = F(request.args)
@@ -449,6 +487,7 @@ def api_centers():
 
 
 @app.route('/api/centers/summary')
+@cached()
 def api_centers_summary():
     db = get_db()
     f = F(request.args)
@@ -494,6 +533,7 @@ def api_centers_summary():
 # ─────────────────────────── KPIs ───────────────────────────────
 
 @app.route('/api/kpis')
+@cached()
 def api_kpis():
     db = get_db()
     f = F(request.args)
@@ -510,8 +550,9 @@ def api_kpis():
     pay_all = one("SELECT SUM(t.amount) s FROM transactions t " + (W + " AND t.flow='پرداخت'" if W else "WHERE t.flow='پرداخت'"), P)
     pay_cash = one("SELECT SUM(t.amount) s FROM transactions t " + (W + " AND t.flow='پرداخت' AND t.method='نقدی'" if W else "WHERE t.flow='پرداخت' AND t.method='نقدی'"), P)
     receipts = one("SELECT SUM(t.amount) s FROM transactions t " + (W + " AND t.flow='دریافت'" if W else "WHERE t.flow='دریافت'"), P)
-    reqs = one("SELECT COUNT(*) s FROM requests r" + (f" WHERE r.year={yr}" if yr else "") +
-               (' AND r.province_id=' + str(f['province']) if f['province'] != 'all' else ''))
+    reqs = one('SELECT COUNT(*) s FROM requests r' +
+               (f' WHERE r.year={yr}' if yr else '') +
+               ((' AND ' if yr else ' WHERE ') + f'r.province_id = {int(f["province"])}' if f['province'] != 'all' else ''))
     req_nat = one("SELECT COUNT(*) s FROM requests r WHERE r.national_id IS NOT NULL AND r.national_id != ''" +
                   (f" AND r.year={yr}" if yr else "") +
                   (' AND r.province_id=' + str(f['province']) if f['province'] != 'all' else ''))
@@ -768,6 +809,7 @@ def api_export_csv():
 # ─────────────────── narrative / insights / networks ────────────
 
 @app.route('/api/narrative')
+@cached()
 def api_narrative():
     db = get_db()
     f = F(request.args)
@@ -775,6 +817,7 @@ def api_narrative():
 
 
 @app.route('/api/insights')
+@cached()
 def api_insights():
     db = get_db()
     f = F(request.args)
@@ -782,6 +825,7 @@ def api_insights():
 
 
 @app.route('/api/networks')
+@cached()
 def api_networks():
     db = get_db()
     f = F(request.args)
@@ -801,6 +845,7 @@ def api_networks():
 
 
 @app.route('/api/finance')
+@cached()
 def api_finance():
     db = get_db()
     cats = [r['category'] for r in db.execute(
@@ -821,6 +866,7 @@ def api_finance():
 
 
 @app.route('/api/quality')
+@cached()
 def api_quality():
     db = get_db()
     logs = rows_as_dicts(db.execute('SELECT * FROM import_log ORDER BY id DESC LIMIT 60'))
@@ -869,6 +915,7 @@ def api_import():
             results.append(import_file(db, path, extra_log=True))
         except Exception as e:  # noqa
             results.append({'filename': fs.filename, 'error': str(e)[:300]})
+    cache_bump()  # داده تغییر کرد — کش همه داشبوردها باطل شود
     return jsonify({'results': results})
 
 
@@ -882,6 +929,7 @@ def api_reset_db():
         db.execute(f'DELETE FROM "{t}"')
     set_meta(db, 'data_mode', 'empty')
     db.commit()
+    cache_bump()  # داده تغییر کرد — کش همه داشبوردها باطل شود
     return jsonify({'ok': True, 'cleared': len(names)})
 
 
@@ -894,31 +942,72 @@ def api_recompute():
     score_centers(db)
     set_meta(db, 'imported_at', str(int(time.time())))
     n = db.execute('SELECT COUNT(*) n FROM centers').fetchone()['n']
+    cache_bump()  # داده تغییر کرد — کش همه داشبوردها باطل شود
     return jsonify({'ok': True, 'centers_scored': n})
 
 
 @app.route('/api/health')
 def api_health():
-    return jsonify({'ok': True, 'time': int(time.time())})
+    # نسخه برای اطمینان از اجرای آخرین کد (اگر نسخه قدیمی بود یعنی سرور ری‌استارت نشده)
+    return jsonify({'ok': True, 'time': int(time.time()), 'version': SERVER_VERSION})
 
 
 # ─────────────────────── static frontend ────────────────────────
 
+
+def _no_cache(resp):
+    """index.html باید همیشه تازه لود شود تا bundle جدید (با hash جدید) دیده شود"""
+    resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    return resp
+
+
 @app.route('/')
 def index():
     if os.path.exists(os.path.join(FRONT_DIST, 'index.html')):
-        return send_from_directory(FRONT_DIST, 'index.html')
+        return _no_cache(send_from_directory(FRONT_DIST, 'index.html'))
     return Response('<h3>Frontend build not found — run: npm run build</h3>', mimetype='text/html')
 
 
 @app.route('/<path:path>')
 def static_files(path):
+    # مسیرهای ناشناختهٔ API هرگز نباید index.html بگیرند — JSON خطا برگردانند
+    if path == 'api' or path.startswith('api/'):
+        return jsonify({'error': f'مسیر API یافت نشد: /{path}'}), 404
     full = os.path.join(FRONT_DIST, path)
     if os.path.isfile(full):
-        return send_from_directory(FRONT_DIST, path)
-    return send_from_directory(FRONT_DIST, 'index.html')
+        resp = send_from_directory(FRONT_DIST, path)
+        if path == 'index.html':
+            return _no_cache(resp)
+        if path.startswith('assets/'):
+            # فایل‌های باندل هش‌دار — کش بلندمدت برای سرعت لود داشبوردها
+            resp.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
+        return resp
+    if os.path.exists(os.path.join(FRONT_DIST, 'index.html')):
+        return _no_cache(send_from_directory(FRONT_DIST, 'index.html'))
+    return Response('<h3>Frontend build not found — run: npm run build</h3>', mimetype='text/html')
+
+
+@app.errorhandler(404)
+def not_found(_e):
+    """هر مسیر ناشناختهٔ API به‌جای HTML حتماً JSON برگرداند تا خطای JSON.parse رخ ندهد"""
+    if request.path.startswith('/api/'):
+        return jsonify({'error': f'مسیر API یافت نشد: {request.path}'}), 404
+    return _no_cache(send_from_directory(FRONT_DIST, 'index.html'))
+
+
+@app.errorhandler(500)
+def server_error(_e):
+    """خطای داخلی در مسیرهای API هم JSON برگرداند، نه صفحهٔ HTML"""
+    if request.path.startswith('/api/'):
+        return jsonify({'error': 'خطای داخلی سرور در پردازش درخواست'}), 500
+    return 'Internal Server Error', 500
 
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8000))
+    # اعمال اسکیما و شاخص‌های جدید روی پایگاه داده موجود (یک‌بار در هر اجرا)
+    with app.app_context():
+        _db = get_db()
+        ensure_schema(_db)
+    print(f'نیکوکاری {SERVER_VERSION} — سرور روی پورت {port}')
     app.run(host='0.0.0.0', port=port, threaded=True)

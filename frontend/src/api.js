@@ -10,11 +10,26 @@ function buildQS(filters = {}, extra = {}) {
 }
 
 async function getJSON(path, filters = {}, extra = {}) {
-  const res = await fetch(`/api/${path}${buildQS(filters, extra)}`)
+  let res
+  try {
+    res = await fetch(`/api/${path}${buildQS(filters, extra)}`)
+  } catch (_) {
+    throw new Error('اتصال به سرور برقرار نشد — لطفاً مطمئن شوید سرور در حال اجرا است')
+  }
+  const ct = (res.headers.get('content-type') || '').toLowerCase()
   if (!res.ok) {
-    let msg = res.statusText
-    try { msg = (await res.json()).error || msg } catch (_) { /* noop */ }
+    let msg = res.statusText || ('HTTP ' + res.status)
+    if (ct.includes('application/json')) {
+      try { msg = (await res.json()).error || msg } catch (_) { /* noop */ }
+    } else if (res.status === 500) {
+      msg = 'خطای داخلی سرور — اگر ادامه یافت، سرور را با آخرین نسخه راه‌اندازی مجدد کنید'
+    }
     throw new Error(`API ${path}: ${msg}`)
+  }
+  // پاسخ ۲۰۰ اما غیر JSON (مثلاً HTML) — هرگز res.json() صدا زده نمی‌شود تا
+  // خطای خام JSON.parse به کاربر نمایش داده نشود
+  if (!ct.includes('application/json')) {
+    throw new Error(`API ${path}: پاسخ سرور JSON نبود — سرور قدیمی است؛ سرویس را با آخرین نسخه راه‌اندازی مجدد کنید`)
   }
   return res.json()
 }

@@ -105,6 +105,8 @@ CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
 
 INDEXES = """
 CREATE INDEX IF NOT EXISTS ix_tx_prov_year ON transactions(province_id, year, month, flow, method);
+CREATE INDEX IF NOT EXISTS ix_tx_year_flow ON transactions(year, flow);
+CREATE INDEX IF NOT EXISTS ix_tx_flow_month ON transactions(flow, year, month);
 CREATE INDEX IF NOT EXISTS ix_tx_cat ON transactions(category);
 CREATE INDEX IF NOT EXISTS ix_tx_center ON transactions(center_id);
 CREATE INDEX IF NOT EXISTS ix_req_prov_year ON requests(province_id, year, month);
@@ -112,7 +114,10 @@ CREATE INDEX IF NOT EXISTS ix_req_center ON requests(center_id);
 CREATE INDEX IF NOT EXISTS ix_needy_prov ON needy(province_id, decile);
 CREATE INDEX IF NOT EXISTS ix_needy_center ON needy(center_id);
 CREATE INDEX IF NOT EXISTS ix_centers_prov ON centers(province_id, status);
+CREATE INDEX IF NOT EXISTS ix_centers_office ON centers(office_id);
 CREATE INDEX IF NOT EXISTS ix_members_center ON members(center_id);
+CREATE INDEX IF NOT EXISTS ix_ham_prov ON hamyaran(province_id);
+CREATE INDEX IF NOT EXISTS ix_net_center ON networks(center_id);
 CREATE INDEX IF NOT EXISTS ix_tx_src ON transactions(src_file);
 CREATE INDEX IF NOT EXISTS ix_needy_src ON needy(src_file);
 CREATE INDEX IF NOT EXISTS ix_req_src ON requests(src_file);
@@ -124,6 +129,10 @@ def connect(db_path=None):
     conn = sqlite3.connect(db_path or DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA journal_mode=WAL')
+    # بهینه‌سازی سرعت خواندن برای داشبوردها
+    conn.execute('PRAGMA synchronous=NORMAL')
+    conn.execute('PRAGMA temp_store=MEMORY')
+    conn.execute('PRAGMA cache_size=-32000')  # ~۳۲ مگابایت کش صفحه
     return conn
 
 
